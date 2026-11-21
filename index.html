@@ -134,8 +134,16 @@
        atau masukkan langsung lewat tombol "Konfigurasi Supabase" di layar Login.
        Jika dibiarkan kosong, aplikasi otomatis berjalan dalam Mode Demo Interaktif.
     ============================================================================ */
-    const DEFAULT_SUPABASE_URL = '';
-    const DEFAULT_SUPABASE_ANON_KEY = '';
+const PROD_DOMAINS = ["kasipd32.vercel.app"];
+const isProduction = PROD_DOMAINS.includes(window.location.hostname);
+
+const DEFAULT_SUPABASE_URL = isProduction
+  ? "https://blplhbwuteteuojxzkmk.supabase.co/rest/v1/"
+  : "https://qkfxfwbxodhqsycyjhom.supabase.co/rest/v1/";
+
+const DEFAULT_SUPABASE_ANON_KEY = isProduction
+  ? "sb_publishable_CT0KHwZvZUlAtC4fsuwVuQ_byxvcKY1"
+  : "sb_publishable_53oiIMbggpaqkCZoBQcYUA_-juOwRIF";
 
     const STORAGE_KEYS = {
       SB_URL: 'kas_ipd32_sb_url',

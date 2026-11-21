@@ -1,0 +1,3710 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>KAS IPD 32 — Sistem Manajemen Kas & Patungan</title>
+
+  <!-- Google Fonts: Plus Jakarta Sans & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'Inter', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#F0FDFA',
+              100: '#CCFBF1',
+              500: '#14B8A6',
+              600: '#0D9488',
+              700: '#0F766E',
+              800: '#115E59',
+              900: '#134E4A',
+            },
+          },
+          boxShadow: {
+            glass: '0 4px 24px -6px rgba(15, 23, 42, 0.06)',
+            float: '0 12px 36px -8px rgba(15, 23, 42, 0.14)',
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Supabase JS v2 CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <style>
+    /* Reset & Full-Page Fixed App Wrapper (kompatibel embed Blogger tanpa edit XML) */
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: 'Plus Jakarta Sans', 'Inter', system-ui, sans-serif;
+      background-color: #F8FAFC;
+      color: #334155;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    #kas-app-wrapper {
+      position: fixed;
+      inset: 0;
+      z-index: 999999;
+      background-color: #F8FAFC;
+      background-image:
+        radial-gradient(at 0% 0%, rgba(224, 242, 254, 0.65) 0px, transparent 50%),
+        radial-gradient(at 100% 0%, rgba(204, 251, 241, 0.55) 0px, transparent 48%),
+        radial-gradient(at 50% 100%, rgba(241, 245, 249, 0.85) 0px, transparent 55%);
+      overflow: hidden;
+    }
+
+    /* Tabular numbers untuk seluruh angka Rupiah */
+    .tabular-nums {
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Custom subtle scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.45);
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(100, 116, 139, 0.65);
+    }
+
+    /* Glass surface utility */
+    .glass-card {
+      background: rgba(255, 255, 255, 0.80);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid rgba(226, 232, 240, 0.85);
+      box-shadow: 0 4px 24px -6px rgba(15, 23, 42, 0.06);
+    }
+
+    /* Sticky column shadow saat matriks digeser horizontal */
+    .sticky-col-shadow {
+      box-shadow: 4px 0 10px -4px rgba(15, 23, 42, 0.08);
+    }
+
+    /* Smooth fade animation */
+    @keyframes fadeSlideUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-up {
+      animation: fadeSlideUp 0.22s ease-out forwards;
+    }
+  </style>
+</head>
+<body>
+  <!-- Full-Page Fixed Container -->
+  <div id="kas-app-wrapper" class="flex flex-col h-full w-full text-slate-700 select-none sm:select-auto">
+    <!-- Toast Container -->
+    <div id="toast-container" class="fixed top-4 right-4 z-[1000010] flex flex-col gap-2 max-w-sm w-[calc(100vw-2rem)] pointer-events-none"></div>
+
+    <!-- Modal Root Container -->
+    <div id="modal-root" class="hidden fixed inset-0 z-[1000005] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm overflow-y-auto"></div>
+
+    <!-- Main Dynamic View Root (Login atau App Shell) -->
+    <div id="app-root" class="flex-1 flex h-full w-full overflow-hidden"></div>
+  </div>
+
+  <script>
+    /* ============================================================================
+       KONFIGURASI SUPABASE
+       Isi SUPABASE_URL dan SUPABASE_ANON_KEY proyek Anda di bawah ini,
+       atau masukkan langsung lewat tombol "Konfigurasi Supabase" di layar Login.
+       Jika dibiarkan kosong, aplikasi otomatis berjalan dalam Mode Demo Interaktif.
+    ============================================================================ */
+    const DEFAULT_SUPABASE_URL = '';
+    const DEFAULT_SUPABASE_ANON_KEY = '';
+
+    const STORAGE_KEYS = {
+      SB_URL: 'kas_ipd32_sb_url',
+      SB_KEY: 'kas_ipd32_sb_key',
+      SESSION: 'kas_ipd32_session',
+      DEMO_DB: 'kas_ipd32_demo_db_v1',
+    };
+
+    const MONTHS = [
+      { num: 1, short: 'Jan', full: 'Januari' },
+      { num: 2, short: 'Feb', full: 'Februari' },
+      { num: 3, short: 'Mar', full: 'Maret' },
+      { num: 4, short: 'Apr', full: 'April' },
+      { num: 5, short: 'Mei', full: 'Mei' },
+      { num: 6, short: 'Jun', full: 'Juni' },
+      { num: 7, short: 'Jul', full: 'Juli' },
+      { num: 8, short: 'Ags', full: 'Agustus' },
+      { num: 9, short: 'Sep', full: 'September' },
+      { num: 10, short: 'Okt', full: 'Oktober' },
+      { num: 11, short: 'Nov', full: 'November' },
+      { num: 12, short: 'Des', full: 'Desember' },
+    ];
+
+    const KATEGORI_MASUK = ['Cordlife', 'IND', 'Sisa Patungan', 'Donasi / Lainnya'];
+    const KATEGORI_KELUAR = [
+      'Adm Bank',
+      'Besuk / Sakit',
+      'Duka / Melayat',
+      'Takjil / Ramadhan',
+      'Kado / Pernikahan',
+      'Konsumsi / Rapat',
+      'Makan Perpisahan',
+      'Defisit Patungan',
+      'Perlengkapan Ruangan',
+      'Lainnya',
+    ];
+
+    /* ============================================================================
+       SQL MIGRATION SCRIPT (SIAP SALIN KE SUPABASE SQL EDITOR)
+    ============================================================================ */
+    const SUPABASE_SQL_SCRIPT = `-- ============================================================
+-- SKEMA DATABASE SUPABASE: APLIKASI KAS IPD 32
+-- Jalankan skrip ini di Supabase Dashboard -> SQL Editor -> Run
+-- ============================================================
+
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- 1. Tabel Periode & Tarif Kas Tahunan
+CREATE TABLE IF NOT EXISTS public.periode_kas (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tahun INT UNIQUE NOT NULL,
+  tarif_bulanan BIGINT NOT NULL DEFAULT 20000,
+  keterangan TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. Tabel Master Anggota (sekaligus kredensial login Role Anggota)
+CREATE TABLE IF NOT EXISTS public.anggota (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  nama TEXT NOT NULL,
+  peran TEXT NOT NULL DEFAULT 'Perawat',
+  username TEXT UNIQUE NOT NULL,
+  password TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'Aktif' CHECK (status IN ('Aktif', 'Resign', 'Mutasi', 'Pindah')),
+  catatan_status TEXT,
+  aktif_sejak TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. Tabel Iuran Kas Bulanan (anti duplikasi per anggota-tahun-bulan)
+CREATE TABLE IF NOT EXISTS public.iuran_kas (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  anggota_id UUID NOT NULL REFERENCES public.anggota(id) ON DELETE CASCADE,
+  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE CASCADE,
+  bulan SMALLINT NOT NULL CHECK (bulan BETWEEN 1 AND 12),
+  nominal BIGINT NOT NULL DEFAULT 0,
+  tanggal_bayar DATE DEFAULT CURRENT_DATE,
+  keterangan TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(anggota_id, tahun, bulan)
+);
+
+-- 4. Tabel Saldo Lebih Bayar per Anggota per Tahun
+CREATE TABLE IF NOT EXISTS public.saldo_lebih_bayar (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  anggota_id UUID NOT NULL REFERENCES public.anggota(id) ON DELETE CASCADE,
+  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE CASCADE,
+  nominal BIGINT NOT NULL DEFAULT 0,
+  keterangan TEXT,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(anggota_id, tahun)
+);
+
+-- 5. Tabel Master Patungan & Acara
+CREATE TABLE IF NOT EXISTS public.patungan_event (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  nama_event TEXT NOT NULL,
+  tahun INT NOT NULL,
+  tarif_default BIGINT NOT NULL DEFAULT 0,
+  catatan_tarif TEXT,
+  total_pengeluaran BIGINT NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'Berjalan' CHECK (status IN ('Berjalan', 'Selesai')),
+  terposting_ke_kas BOOLEAN NOT NULL DEFAULT FALSE,
+  keterangan TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 6. Tabel Peserta Patungan (mendukung anggota internal & peserta eksternal/dokter)
+CREATE TABLE IF NOT EXISTS public.patungan_peserta (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  patungan_id UUID NOT NULL REFERENCES public.patungan_event(id) ON DELETE CASCADE,
+  anggota_id UUID REFERENCES public.anggota(id) ON DELETE SET NULL,
+  nama_peserta TEXT NOT NULL,
+  tarif_target BIGINT NOT NULL DEFAULT 0,
+  nominal_bayar BIGINT NOT NULL DEFAULT 0,
+  status_bayar TEXT NOT NULL DEFAULT 'Belum Bayar' CHECK (status_bayar IN ('Lunas', 'Belum Bayar')),
+  keterangan TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 7. Tabel Transaksi Kas (Pemasukan Lain & Pengeluaran)
+CREATE TABLE IF NOT EXISTS public.transaksi_kas (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tahun INT NOT NULL,
+  bulan SMALLINT NOT NULL CHECK (bulan BETWEEN 1 AND 12),
+  tanggal DATE NOT NULL DEFAULT CURRENT_DATE,
+  tipe TEXT NOT NULL CHECK (tipe IN ('masuk_lain', 'keluar')),
+  kategori TEXT NOT NULL,
+  deskripsi TEXT NOT NULL,
+  nominal BIGINT NOT NULL CHECK (nominal >= 0),
+  patungan_id UUID REFERENCES public.patungan_event(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- ROW LEVEL SECURITY (RLS) UNTUK HYBRID AUTH
+-- Anggota (Anon / Login via Tabel) -> READ ONLY
+-- Admin (Supabase Auth Authenticated) -> FULL CRUD
+-- ============================================================
+ALTER TABLE public.periode_kas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.anggota ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.iuran_kas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.saldo_lebih_bayar ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.patungan_event ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.patungan_peserta ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transaksi_kas ENABLE ROW LEVEL SECURITY;
+
+-- Kebijakan SELECT transparan untuk Anggota & Admin
+CREATE POLICY "Read periode_kas" ON public.periode_kas FOR SELECT USING (true);
+CREATE POLICY "Read anggota" ON public.anggota FOR SELECT USING (true);
+CREATE POLICY "Read iuran_kas" ON public.iuran_kas FOR SELECT USING (true);
+CREATE POLICY "Read saldo_lebih_bayar" ON public.saldo_lebih_bayar FOR SELECT USING (true);
+CREATE POLICY "Read patungan_event" ON public.patungan_event FOR SELECT USING (true);
+CREATE POLICY "Read patungan_peserta" ON public.patungan_peserta FOR SELECT USING (true);
+CREATE POLICY "Read transaksi_kas" ON public.transaksi_kas FOR SELECT USING (true);
+
+-- Kebijakan WRITE (INSERT/UPDATE/DELETE) khusus Admin (Supabase Auth)
+CREATE POLICY "Admin write periode_kas" ON public.periode_kas FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
+CREATE POLICY "Admin write anggota" ON public.anggota FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
+CREATE POLICY "Admin write iuran_kas" ON public.iuran_kas FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
+CREATE POLICY "Admin write saldo_lebih_bayar" ON public.saldo_lebih_bayar FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
+CREATE POLICY "Admin write patungan_event" ON public.patungan_event FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
+CREATE POLICY "Admin write patungan_peserta" ON public.patungan_peserta FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
+CREATE POLICY "Admin write transaksi_kas" ON public.transaksi_kas FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
+
+-- ============================================================
+-- DATA AWAL (SEED PERIODE KAS 2023-2026 & CONTOH ANGGOTA)
+-- ============================================================
+INSERT INTO public.periode_kas (tahun, tarif_bulanan, keterangan) VALUES
+  (2023, 10000, 'Tarif awal iuran kas IPD 32'),
+  (2024, 15000, 'Penyesuaian tarif iuran 2024'),
+  (2025, 15000, 'Tarif iuran tahun 2025'),
+  (2026, 20000, 'Penyesuaian tarif iuran 2026')
+ON CONFLICT (tahun) DO NOTHING;
+
+INSERT INTO public.anggota (nama, peran, username, password, status, catatan_status, aktif_sejak) VALUES
+  ('Atika', 'Perawat', 'atika', 'ipd32', 'Aktif', '', '2023'),
+  ('Elvina', 'Perawat', 'elvina', 'ipd32', 'Aktif', '', '2023'),
+  ('Tiara HCA', 'HCA', 'tiara', 'ipd32', 'Aktif', '', '2024')
+ON CONFLICT (username) DO NOTHING;
+`;
+
+    /* ============================================================================
+       UTILITAS PEMBANTU (FORMATTER, ESCAPE HTML, UUID, CLIPBOARD, TOAST)
+    ============================================================================ */
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatRp(amount, showPlus = false) {
+      const num = Number(amount) || 0;
+      const abs = Math.abs(num);
+      const formatted = new Intl.NumberFormat('id-ID').format(abs);
+      if (num < 0) return `-Rp ${formatted}`;
+      if (num > 0 && showPlus) return `+Rp ${formatted}`;
+      return `Rp ${formatted}`;
+    }
+
+    function formatCompactRp(amount) {
+      const num = Number(amount) || 0;
+      const abs = Math.abs(num);
+      const sign = num < 0 ? '-' : '';
+      if (abs >= 1000000) return `${sign}Rp ${(abs / 1000000).toFixed(2).replace('.', ',')} jt`;
+      if (abs >= 1000) return `${sign}Rp ${Math.round(abs / 1000)} rb`;
+      return `${sign}Rp ${abs}`;
+    }
+
+    function formatDateId(dateStr) {
+      if (!dateStr) return '-';
+      const d = new Date(dateStr + 'T00:00:00');
+      if (isNaN(d.getTime())) return dateStr;
+      return d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
+    }
+
+    function generateUuid() {
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
+    }
+
+    function copyTextToClipboard(text, successMsg = 'Berhasil disalin ke clipboard') {
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        if (ok) showToast(successMsg, 'success');
+        else showToast('Gagal menyalin teks. Silakan salin manual.', 'error');
+      } catch (err) {
+        showToast('Gagal menyalin teks: ' + err.message, 'error');
+      }
+    }
+
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+      const id = 'toast-' + Date.now() + Math.random().toString(36).slice(2, 6);
+      const styles = {
+        success: 'bg-emerald-50/95 border-emerald-200 text-emerald-800',
+        error: 'bg-rose-50/95 border-rose-200 text-rose-800',
+        warning: 'bg-amber-50/95 border-amber-200 text-amber-800',
+        info: 'bg-white/95 border-slate-200 text-slate-800',
+      };
+      const icons = {
+        success: 'check-circle-2',
+        error: 'alert-circle',
+        warning: 'alert-triangle',
+        info: 'info',
+      };
+      const el = document.createElement('div');
+      el.id = id;
+      el.className = `pointer-events-auto flex items-start gap-2.5 px-4 py-3 rounded-2xl border shadow-float backdrop-blur-md text-sm font-medium animate-fade-up ${styles[type] || styles.info}`;
+      el.innerHTML = `
+        <i data-lucide="${icons[type] || 'info'}" class="w-4 h-4 mt-0.5 shrink-0"></i>
+        <span class="flex-1 leading-snug">${escapeHtml(message)}</span>
+        <button onclick="document.getElementById('${id}')?.remove()" class="opacity-60 hover:opacity-100 p-0.5">
+          <i data-lucide="x" class="w-3.5 h-3.5"></i>
+        </button>
+      `;
+      container.appendChild(el);
+      if (window.lucide) lucide.createIcons();
+      setTimeout(() => {
+        const node = document.getElementById(id);
+        if (node) {
+          node.style.opacity = '0';
+          node.style.transition = 'opacity 0.25s ease';
+          setTimeout(() => node.remove(), 260);
+        }
+      }, 3600);
+    }
+
+    /* ============================================================================
+       MODAL CONTROLLER (TANPA alert() / confirm())
+    ============================================================================ */
+    function openModal(htmlContent, maxWidthClass = 'max-w-lg') {
+      const root = document.getElementById('modal-root');
+      root.innerHTML = `
+        <div class="w-full ${maxWidthClass} bg-white rounded-2xl shadow-2xl border border-slate-200/90 overflow-hidden animate-fade-up my-auto max-h-[90vh] flex flex-col" onclick="event.stopPropagation()">
+          ${htmlContent}
+        </div>
+      `;
+      root.classList.remove('hidden');
+      root.onclick = () => closeModal();
+      if (window.lucide) lucide.createIcons();
+    }
+
+    function closeModal() {
+      const root = document.getElementById('modal-root');
+      root.classList.add('hidden');
+      root.innerHTML = '';
+    }
+
+    function openConfirmModal({ title, message, confirmLabel = 'Ya, Lanjutkan', danger = false, onConfirm }) {
+      const btnColor = danger
+        ? 'bg-rose-600 hover:bg-rose-700 text-white'
+        : 'bg-teal-700 hover:bg-teal-800 text-white';
+      const iconBg = danger ? 'bg-rose-50 text-rose-600' : 'bg-teal-50 text-teal-700';
+      const iconName = danger ? 'trash-2' : 'help-circle';
+
+      window.__pendingConfirm = async () => {
+        closeModal();
+        if (typeof onConfirm === 'function') await onConfirm();
+      };
+
+      openModal(`
+        <div class="p-6">
+          <div class="flex items-start gap-4">
+            <div class="w-11 h-11 rounded-2xl ${iconBg} flex items-center justify-center shrink-0">
+              <i data-lucide="${iconName}" class="w-5 h-5"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+              <h3 class="text-base font-bold text-slate-900">${escapeHtml(title)}</h3>
+              <p class="text-sm text-slate-600 mt-1.5 leading-relaxed">${escapeHtml(message)}</p>
+            </div>
+          </div>
+          <div class="flex items-center justify-end gap-2.5 mt-6">
+            <button onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-sm font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 transition active:scale-[0.98]">
+              Batal
+            </button>
+            <button onclick="window.__pendingConfirm()" class="px-4 py-2.5 rounded-xl text-sm font-semibold ${btnColor} transition active:scale-[0.98] shadow-sm">
+              ${escapeHtml(confirmLabel)}
+            </button>
+          </div>
+        </div>
+      `, 'max-w-md');
+    }
+
+    /* ============================================================================
+       DEMO SEED DATA (MEREFLEKSIKAN STRUKTUR REALISTIS KAS UPDATE IPD 32.xlsx)
+    ============================================================================ */
+    function buildDemoSeedData() {
+      const periode_kas = [
+        { id: 'p-2023', tahun: 2023, tarif_bulanan: 10000, keterangan: 'Tarif awal kas ruangan IPD 32' },
+        { id: 'p-2024', tahun: 2024, tarif_bulanan: 15000, keterangan: 'Penyesuaian iuran 2024' },
+        { id: 'p-2025', tahun: 2025, tarif_bulanan: 15000, keterangan: 'Tarif tetap 2025' },
+        { id: 'p-2026', tahun: 2026, tarif_bulanan: 20000, keterangan: 'Penyesuaian tarif iuran 2026' },
+      ];
+
+      const memberNames = [
+        { id: 'm-01', nama: 'Atika', peran: 'Perawat', username: 'atika', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-02', nama: 'Elvina', peran: 'Perawat', username: 'elvina', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-03', nama: 'Tiara HCA', peran: 'HCA', username: 'tiara', status: 'Aktif', catatan: 'Cek ulang iuran Ags/Sep 2025', sejak: '2024' },
+        { id: 'm-04', nama: 'Ns. Rina Kartika', peran: 'Perawat', username: 'rina', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-05', nama: 'Ns. Dewi Lestari', peran: 'Perawat', username: 'dewi', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-06', nama: 'Ns. Putri Rahma', peran: 'Perawat', username: 'putri', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-07', nama: 'Ns. Sari Wulandari', peran: 'Perawat', username: 'sari', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-08', nama: 'Ns. Nadia Kusuma', peran: 'Perawat', username: 'nadia', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-09', nama: 'Ns. Fitriani', peran: 'Perawat', username: 'fitri', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-10', nama: 'Ns. Indah Permata', peran: 'Perawat', username: 'indah', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-11', nama: 'Ns. Ayu Pratiwi', peran: 'Perawat', username: 'ayu', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-12', nama: 'Ns. Diah Anggraini', peran: 'Perawat', username: 'diah', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-13', nama: 'Ns. Wahyu Pratama', peran: 'Perawat', username: 'wahyu', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-14', nama: 'Ns. Rizky Saputra', peran: 'Perawat', username: 'rizky', status: 'Aktif', catatan: '', sejak: '2023' },
+        { id: 'm-15', nama: 'Ns. Mega Puspita', peran: 'Perawat', username: 'mega', status: 'Aktif', catatan: '', sejak: '2024' },
+        { id: 'm-16', nama: 'Ns. Nurul Hidayah', peran: 'Perawat', username: 'nurul', status: 'Aktif', catatan: '', sejak: '2024' },
+        { id: 'm-17', nama: 'Ns. Clara Wijaya', peran: 'Perawat', username: 'clara', status: 'Aktif', catatan: '', sejak: '2024' },
+        { id: 'm-18', nama: 'Ns. Ratna Sari', peran: 'Perawat', username: 'ratna', status: 'Aktif', catatan: '', sejak: '2024' },
+        { id: 'm-19', nama: 'Budi HCA', peran: 'HCA', username: 'budi', status: 'Aktif', catatan: '', sejak: '2024' },
+        { id: 'm-20', nama: 'Sinta HCA', peran: 'HCA', username: 'sinta', status: 'Aktif', catatan: '', sejak: '2025' },
+        { id: 'm-21', nama: 'Ns. Melati', peran: 'Perawat', username: 'melati', status: 'Aktif', catatan: '', sejak: '2025' },
+        { id: 'm-22', nama: 'Ns. Hana Safitri', peran: 'Perawat', username: 'hana', status: 'Aktif', catatan: 'Bergabung Feb 2026', sejak: '2026' },
+        { id: 'm-23', nama: 'Dana', peran: 'Perawat', username: 'dana', status: 'Resign', catatan: 'Resign Mei 2026', sejak: '2023' },
+        { id: 'm-24', nama: 'Mutiara', peran: 'Perawat', username: 'mutiara', status: 'Mutasi', catatan: 'Mutasi ke Unit ICU Jul 2026', sejak: '2023' },
+        { id: 'm-25', nama: 'Ns. Dimas', peran: 'Perawat', username: 'dimas', status: 'Resign', catatan: 'Resign Nov 2025', sejak: '2023' },
+      ];
+
+      const anggota = memberNames.map((m) => ({
+        id: m.id,
+        nama: m.nama,
+        peran: m.peran,
+        username: m.username,
+        password: '123',
+        status: m.status,
+        catatan_status: m.catatan,
+        aktif_sejak: m.sejak,
+      }));
+
+      // Bangun data iuran kas 2023 - 2026
+      const iuran_kas = [];
+      let iuranSeq = 1;
+
+      const addIuran = (anggotaId, tahun, bulan, nominal, keterangan = '') => {
+        iuran_kas.push({
+          id: `iu-${iuranSeq++}`,
+          anggota_id: anggotaId,
+          tahun,
+          bulan,
+          nominal,
+          tanggal_bayar: `${tahun}-${String(bulan).padStart(2, '0')}-10`,
+          keterangan,
+        });
+      };
+
+      // 2023 (Rp 10.000) - 16 anggota aktif saat itu
+      anggota.slice(0, 14).concat([anggota[22], anggota[23], anggota[24]]).forEach((m) => {
+        for (let b = 1; b <= 12; b++) addIuran(m.id, 2023, b, 10000);
+      });
+
+      // 2024 (Rp 15.000) - 20 anggota
+      anggota.slice(0, 19).concat([anggota[22], anggota[23], anggota[24]]).forEach((m) => {
+        for (let b = 1; b <= 12; b++) addIuran(m.id, 2024, b, 15000);
+      });
+
+      // 2025 (Rp 15.000) - 24 anggota
+      anggota.forEach((m, idx) => {
+        if (m.id === 'm-22') return; // Hana bergabung 2026
+        const maxMonth = m.id === 'm-25' ? 11 : 12;
+        for (let b = 1; b <= maxMonth; b++) {
+          addIuran(m.id, 2025, b, 15000);
+        }
+      });
+
+      // 2026 (Rp 20.000) - sampai Nov 2026 dengan variasi Lunas & Kurang Bayar
+      anggota.forEach((m, idx) => {
+        if (m.id === 'm-25') return; // Sudah resign 2025
+        let startM = m.id === 'm-22' ? 2 : 1;
+        let endM = 11;
+        if (m.id === 'm-23') endM = 5; // Dana resign Mei
+        else if (m.id === 'm-24') endM = 7; // Mutiara mutasi Juli
+        else if (idx % 5 === 0) endM = 12; // Sudah lunas full setahun
+        else if (idx % 4 === 3) endM = 9; // Kurang bayar Okt-Nov
+        else if (idx % 7 === 2) endM = 8; // Kurang bayar Sep-Nov
+
+        for (let b = startM; b <= endM; b++) {
+          addIuran(m.id, 2026, b, 20000);
+        }
+      });
+
+      const saldo_lebih_bayar = [
+        { id: 'lb-1', anggota_id: 'm-01', tahun: 2026, nominal: 5000, keterangan: 'Sisa transfer iuran' },
+        { id: 'lb-2', anggota_id: 'm-02', tahun: 2026, nominal: 45000, keterangan: 'Deposit iuran dimuka' },
+      ];
+
+      // Patungan & Acara (mencakup dr. Andre multi-tarif, Dana, Mutiara, dll)
+      const patungan_event = [
+        {
+          id: 'pat-1',
+          nama_event: 'Patungan Perpisahan dr. Andre',
+          tahun: 2025,
+          tarif_default: 50000,
+          catatan_tarif: 'Perawat/Ns Rp 50.000 • Dokter Rp 91.000',
+          total_pengeluaran: 1650000,
+          status: 'Selesai',
+          terposting_ke_kas: true,
+          keterangan: 'Kado jam tangan + plakat + makan bersama tim IPD 32 & DPJP',
+        },
+        {
+          id: 'pat-2',
+          nama_event: 'Perpisahan Dana (Resign)',
+          tahun: 2026,
+          tarif_default: 35000,
+          catatan_tarif: 'Seragam Rp 35.000/orang',
+          total_pengeluaran: 680000,
+          status: 'Selesai',
+          terposting_ke_kas: false,
+          keterangan: 'Kado kenang-kenangan & tumpeng mini (belum diposting ke kas)',
+        },
+        {
+          id: 'pat-3',
+          nama_event: 'Perpisahan Mutiara (Mutasi ICU)',
+          tahun: 2026,
+          tarif_default: 35000,
+          catatan_tarif: 'Seragam Rp 35.000/orang',
+          total_pengeluaran: 750000,
+          status: 'Berjalan',
+          terposting_ke_kas: false,
+          keterangan: 'Pengumpulan patungan untuk kado & buket bunga',
+        },
+        {
+          id: 'pat-4',
+          nama_event: 'Kado Pernikahan Ns. Clara',
+          tahun: 2025,
+          tarif_default: 30000,
+          catatan_tarif: 'Seragam Rp 30.000/orang',
+          total_pengeluaran: 590000,
+          status: 'Selesai',
+          terposting_ke_kas: true,
+          keterangan: 'Kado set alat makan & amplop ucapan',
+        },
+        {
+          id: 'pat-5',
+          nama_event: 'Buka Bersama IPD 32 Ramadhan',
+          tahun: 2026,
+          tarif_default: 50000,
+          catatan_tarif: 'Rp 50.000/peserta',
+          total_pengeluaran: 1120000,
+          status: 'Selesai',
+          terposting_ke_kas: true,
+          keterangan: 'Paket nasi box + takjil ruangan shift pagi/sore/malam',
+        },
+      ];
+
+      const patungan_peserta = [];
+      let ppSeq = 1;
+      // Peserta patungan dr. Andre (Perawat 50rb + 6 Dokter eksternal 91rb)
+      anggota.slice(0, 22).forEach((m) => {
+        patungan_peserta.push({
+          id: `pp-${ppSeq++}`,
+          patungan_id: 'pat-1',
+          anggota_id: m.id,
+          nama_peserta: m.nama,
+          tarif_target: 50000,
+          nominal_bayar: 50000,
+          status_bayar: 'Lunas',
+          keterangan: m.peran,
+        });
+      });
+      ['dr. Hendra Sp.PD', 'dr. Maya Sp.PD', 'dr. Budi Sp.PD', 'dr. Ratih Sp.PD', 'dr. Kevin', 'dr. Aulia'].forEach((dok) => {
+        patungan_peserta.push({
+          id: `pp-${ppSeq++}`,
+          patungan_id: 'pat-1',
+          anggota_id: null,
+          nama_peserta: dok,
+          tarif_target: 91000,
+          nominal_bayar: 91000,
+          status_bayar: 'Lunas',
+          keterangan: 'Dokter (Eksternal)',
+        });
+      });
+
+      // Peserta Patungan Dana
+      anggota.slice(0, 22).forEach((m, i) => {
+        const lunas = i < 21;
+        patungan_peserta.push({
+          id: `pp-${ppSeq++}`,
+          patungan_id: 'pat-2',
+          anggota_id: m.id,
+          nama_peserta: m.nama,
+          tarif_target: 35000,
+          nominal_bayar: lunas ? 35000 : 0,
+          status_bayar: lunas ? 'Lunas' : 'Belum Bayar',
+          keterangan: '',
+        });
+      });
+
+      // Peserta Patungan Mutiara (sedang berjalan)
+      anggota.slice(0, 22).forEach((m, i) => {
+        const lunas = i < 16;
+        patungan_peserta.push({
+          id: `pp-${ppSeq++}`,
+          patungan_id: 'pat-3',
+          anggota_id: m.id,
+          nama_peserta: m.nama,
+          tarif_target: 35000,
+          nominal_bayar: lunas ? 35000 : 0,
+          status_bayar: lunas ? 'Lunas' : 'Belum Bayar',
+          keterangan: '',
+        });
+      });
+
+      // Peserta Patungan Clara
+      anggota.slice(0, 20).forEach((m) => {
+        patungan_peserta.push({
+          id: `pp-${ppSeq++}`,
+          patungan_id: 'pat-4',
+          anggota_id: m.id,
+          nama_peserta: m.nama,
+          tarif_target: 30000,
+          nominal_bayar: 30000,
+          status_bayar: 'Lunas',
+          keterangan: '',
+        });
+      });
+
+      // Peserta Bukber
+      anggota.slice(0, 22).forEach((m) => {
+        patungan_peserta.push({
+          id: `pp-${ppSeq++}`,
+          patungan_id: 'pat-5',
+          anggota_id: m.id,
+          nama_peserta: m.nama,
+          tarif_target: 50000,
+          nominal_bayar: 50000,
+          status_bayar: 'Lunas',
+          keterangan: '',
+        });
+      });
+
+      // Transaksi Pemasukan Lain & Pengeluaran (2023 - 2026)
+      const transaksi_kas = [
+        // 2023
+        { id: 'tx-01', tahun: 2023, bulan: 3, tanggal: '2023-03-14', tipe: 'masuk_lain', kategori: 'Cordlife', deskripsi: 'Fee Cordlife Triwulan I', nominal: 350000, patungan_id: null },
+        { id: 'tx-02', tahun: 2023, bulan: 4, tanggal: '2023-04-08', tipe: 'keluar', kategori: 'Takjil / Ramadhan', deskripsi: 'Takjil & buka bersama jaga IPD 32', nominal: 650000, patungan_id: null },
+        { id: 'tx-03', tahun: 2023, bulan: 7, tanggal: '2023-07-21', tipe: 'keluar', kategori: 'Besuk / Sakit', deskripsi: 'Parsel buah besuk keluarga perawat', nominal: 420000, patungan_id: null },
+        { id: 'tx-04', tahun: 2023, bulan: 9, tanggal: '2023-09-12', tipe: 'masuk_lain', kategori: 'IND', deskripsi: 'Pemasukan IND ruangan', nominal: 400000, patungan_id: null },
+        { id: 'tx-05', tahun: 2023, bulan: 11, tanggal: '2023-11-18', tipe: 'keluar', kategori: 'Duka / Melayat', deskripsi: 'Santunan duka cita orang tua anggota', nominal: 500000, patungan_id: null },
+        { id: 'tx-06', tahun: 2023, bulan: 12, tanggal: '2023-12-28', tipe: 'keluar', kategori: 'Adm Bank', deskripsi: 'Rekap potongan adm bank tahun 2023', nominal: 180000, patungan_id: null },
+        { id: 'tx-07', tahun: 2023, bulan: 12, tanggal: '2023-12-30', tipe: 'keluar', kategori: 'Konsumsi / Rapat', deskripsi: 'Konsumsi evaluasi akhir tahun IPD 32', nominal: 850000, patungan_id: null },
+
+        // 2024
+        { id: 'tx-08', tahun: 2024, bulan: 2, tanggal: '2024-02-15', tipe: 'masuk_lain', kategori: 'Cordlife', deskripsi: 'Insentif Cordlife Semester I', nominal: 500000, patungan_id: null },
+        { id: 'tx-09', tahun: 2024, bulan: 3, tanggal: '2024-03-22', tipe: 'keluar', kategori: 'Takjil / Ramadhan', deskripsi: 'Takjil & konsumsi Ramadhan 2024', nominal: 1150000, patungan_id: null },
+        { id: 'tx-10', tahun: 2024, bulan: 6, tanggal: '2024-06-10', tipe: 'keluar', kategori: 'Kado / Pernikahan', deskripsi: 'Kado pernikahan & kelahiran bayi anggota', nominal: 950000, patungan_id: null },
+        { id: 'tx-11', tahun: 2024, bulan: 8, tanggal: '2024-08-19', tipe: 'masuk_lain', kategori: 'IND', deskripsi: 'Pemasukan IND Q3 2024', nominal: 350000, patungan_id: null },
+        { id: 'tx-12', tahun: 2024, bulan: 10, tanggal: '2024-10-05', tipe: 'keluar', kategori: 'Besuk / Sakit', deskripsi: 'Besuk rawat inap & bingkisan anggota', nominal: 780000, patungan_id: null },
+        { id: 'tx-13', tahun: 2024, bulan: 12, tanggal: '2024-12-20', tipe: 'keluar', kategori: 'Makan Perpisahan', deskripsi: 'Makan bersama & kenang-kenangan akhir tahun', nominal: 1620000, patungan_id: null },
+        { id: 'tx-14', tahun: 2024, bulan: 12, tanggal: '2024-12-31', tipe: 'keluar', kategori: 'Adm Bank', deskripsi: 'Potongan adm bank tahun 2024', nominal: 192000, patungan_id: null },
+
+        // 2025
+        { id: 'tx-15', tahun: 2025, bulan: 3, tanggal: '2025-03-18', tipe: 'keluar', kategori: 'Takjil / Ramadhan', deskripsi: 'Konsumsi buka puasa & sahur shift malam', nominal: 1250000, patungan_id: null },
+        { id: 'tx-16', tahun: 2025, bulan: 5, tanggal: '2025-05-11', tipe: 'masuk_lain', kategori: 'Sisa Patungan', deskripsi: 'Sisa Patungan Kado Pernikahan Ns. Clara', nominal: 10000, patungan_id: 'pat-4' },
+        { id: 'tx-17', tahun: 2025, bulan: 7, tanggal: '2025-07-09', tipe: 'masuk_lain', kategori: 'Cordlife', deskripsi: 'Fee Cordlife 2025', nominal: 450000, patungan_id: null },
+        { id: 'tx-18', tahun: 2025, bulan: 8, tanggal: '2025-08-22', tipe: 'keluar', kategori: 'Duka / Melayat', deskripsi: 'Santunan duka & karangan bunga', nominal: 850000, patungan_id: null },
+        { id: 'tx-19', tahun: 2025, bulan: 10, tanggal: '2025-10-14', tipe: 'masuk_lain', kategori: 'Sisa Patungan', deskripsi: 'Sisa Patungan Perpisahan dr. Andre (lebih dari total belanja)', nominal: 0, patungan_id: 'pat-1' },
+        { id: 'tx-20', tahun: 2025, bulan: 11, tanggal: '2025-11-28', tipe: 'keluar', kategori: 'Makan Perpisahan', deskripsi: 'Perpisahan Ns. Dimas & makan tim', nominal: 1380000, patungan_id: null },
+        { id: 'tx-21', tahun: 2025, bulan: 12, tanggal: '2025-12-30', tipe: 'keluar', kategori: 'Adm Bank', deskripsi: 'Potongan adm bank tahun 2025', nominal: 195000, patungan_id: null },
+
+        // 2026
+        { id: 'tx-22', tahun: 2026, bulan: 2, tanggal: '2026-02-14', tipe: 'masuk_lain', kategori: 'Cordlife', deskripsi: 'Fee Cordlife awal tahun 2026', nominal: 400000, patungan_id: null },
+        { id: 'tx-23', tahun: 2026, bulan: 3, tanggal: '2026-03-20', tipe: 'keluar', kategori: 'Defisit Patungan', deskripsi: 'Subsidi kas untuk Buka Bersama IPD 32 Ramadhan', nominal: 20000, patungan_id: 'pat-5' },
+        { id: 'tx-24', tahun: 2026, bulan: 4, tanggal: '2026-04-12', tipe: 'keluar', kategori: 'Besuk / Sakit', deskripsi: 'Besuk anggota sakit & parsel buah', nominal: 650000, patungan_id: null },
+        { id: 'tx-25', tahun: 2026, bulan: 6, tanggal: '2026-06-25', tipe: 'keluar', kategori: 'Perlengkapan Ruangan', deskripsi: 'Dispenser galon, kopi/teh & ATK nurse station', nominal: 1120000, patungan_id: null },
+        { id: 'tx-26', tahun: 2026, bulan: 9, tanggal: '2026-09-18', tipe: 'keluar', kategori: 'Konsumsi / Rapat', deskripsi: 'Konsumsi rapat akreditasi & audit mutu IPD 32', nominal: 1450000, patungan_id: null },
+        { id: 'tx-27', tahun: 2026, bulan: 10, tanggal: '2026-10-30', tipe: 'keluar', kategori: 'Adm Bank', deskripsi: 'Potongan adm bank Jan–Okt 2026', nominal: 165140, patungan_id: null },
+        { id: 'tx-28', tahun: 2026, bulan: 11, tanggal: '2026-11-10', tipe: 'keluar', kategori: 'Kado / Pernikahan', deskripsi: 'Kado kelahiran & bingkisan sosial IPD 32', nominal: 975000, patungan_id: null },
+      ].filter((t) => t.nominal > 0);
+
+      // Hitung sisa patungan dr. Andre yg akurat: 22*50000 + 6*91000 = 1.646.000 vs 1.650.000 -> defisit 4.000
+      transaksi_kas.push({
+        id: 'tx-19b',
+        tahun: 2025,
+        bulan: 10,
+        tanggal: '2025-10-14',
+        tipe: 'keluar',
+        kategori: 'Defisit Patungan',
+        deskripsi: 'Penutupan selisih Patungan Perpisahan dr. Andre',
+        nominal: 4000,
+        patungan_id: 'pat-1',
+      });
+
+      return {
+        periode_kas,
+        anggota,
+        iuran_kas,
+        saldo_lebih_bayar,
+        patungan_event,
+        patungan_peserta,
+        transaksi_kas,
+      };
+    }
+
+    /* ============================================================================
+       DUAL-ENGINE DATA ADAPTER (SUPABASE LIVE + MODE DEMO FALLBACK)
+    ============================================================================ */
+    const DB = {
+      mode: 'demo', // 'supabase' | 'demo'
+      client: null,
+      url: '',
+      key: '',
+
+      init() {
+        const savedUrl = (localStorage.getItem(STORAGE_KEYS.SB_URL) || DEFAULT_SUPABASE_URL || '').trim();
+        const savedKey = (localStorage.getItem(STORAGE_KEYS.SB_KEY) || DEFAULT_SUPABASE_ANON_KEY || '').trim();
+        this.url = savedUrl;
+        this.key = savedKey;
+
+        if (savedUrl && savedKey && window.supabase && typeof window.supabase.createClient === 'function') {
+          try {
+            this.client = window.supabase.createClient(savedUrl, savedKey);
+            this.mode = 'supabase';
+          } catch (e) {
+            console.error('Supabase init error:', e);
+            this.mode = 'demo';
+            this.client = null;
+          }
+        } else {
+          this.mode = 'demo';
+          this.client = null;
+          this.ensureDemoData();
+        }
+      },
+
+      ensureDemoData() {
+        const raw = localStorage.getItem(STORAGE_KEYS.DEMO_DB);
+        if (!raw) {
+          const seed = buildDemoSeedData();
+          localStorage.setItem(STORAGE_KEYS.DEMO_DB, JSON.stringify(seed));
+        }
+      },
+
+      getDemoStore() {
+        this.ensureDemoData();
+        try {
+          return JSON.parse(localStorage.getItem(STORAGE_KEYS.DEMO_DB));
+        } catch {
+          const seed = buildDemoSeedData();
+          localStorage.setItem(STORAGE_KEYS.DEMO_DB, JSON.stringify(seed));
+          return seed;
+        }
+      },
+
+      saveDemoStore(store) {
+        localStorage.setItem(STORAGE_KEYS.DEMO_DB, JSON.stringify(store));
+      },
+
+      resetDemoStore() {
+        const seed = buildDemoSeedData();
+        this.saveDemoStore(seed);
+      },
+
+      async fetchAll() {
+        if (this.mode === 'supabase') {
+          const [p, a, i, lb, t, pe, pp] = await Promise.all([
+            this.client.from('periode_kas').select('*').order('tahun', { ascending: true }),
+            this.client.from('anggota').select('*').order('nama', { ascending: true }),
+            this.client.from('iuran_kas').select('*'),
+            this.client.from('saldo_lebih_bayar').select('*'),
+            this.client.from('transaksi_kas').select('*').order('tanggal', { ascending: false }),
+            this.client.from('patungan_event').select('*').order('tahun', { ascending: false }),
+            this.client.from('patungan_peserta').select('*').order('nama_peserta', { ascending: true }),
+          ]);
+          const firstErr = [p, a, i, lb, t, pe, pp].find((r) => r.error)?.error;
+          if (firstErr) throw new Error(firstErr.message);
+          return {
+            periode_kas: p.data || [],
+            anggota: a.data || [],
+            iuran_kas: i.data || [],
+            saldo_lebih_bayar: lb.data || [],
+            transaksi_kas: t.data || [],
+            patungan_event: pe.data || [],
+            patungan_peserta: pp.data || [],
+          };
+        } else {
+          return this.getDemoStore();
+        }
+      },
+
+      // Hybrid Login: Admin via Supabase Auth
+      async loginAdmin(email, password) {
+        if (this.mode === 'supabase') {
+          const { data, error } = await this.client.auth.signInWithPassword({ email, password });
+          if (error) throw new Error(error.message);
+          return {
+            role: 'admin',
+            nama: data.user?.email?.split('@')[0] || 'Bendahara IPD 32',
+            email: data.user?.email,
+            id: data.user?.id,
+          };
+        } else {
+          if (!email || !password) throw new Error('Email dan password wajib diisi.');
+          return {
+            role: 'admin',
+            nama: 'Bendahara IPD 32',
+            email: email,
+            id: 'demo-admin',
+          };
+        }
+      },
+
+      // Hybrid Login: Anggota via validasi tabel `anggota`
+      async loginAnggota(username, password) {
+        const u = username.trim().toLowerCase();
+        const p = password.trim();
+        if (!u || !p) throw new Error('Username dan password wajib diisi.');
+
+        if (this.mode === 'supabase') {
+          const { data, error } = await this.client
+            .from('anggota')
+            .select('*')
+            .ilike('username', u)
+            .eq('password', p)
+            .maybeSingle();
+          if (error) throw new Error(error.message);
+          if (!data) throw new Error('Username atau password anggota tidak ditemukan.');
+          return {
+            role: 'anggota',
+            id: data.id,
+            nama: data.nama,
+            username: data.username,
+            peran: data.peran,
+            status: data.status,
+          };
+        } else {
+          const store = this.getDemoStore();
+          const found = store.anggota.find(
+            (m) => m.username.toLowerCase() === u && m.password === p
+          );
+          if (!found) throw new Error('Username atau password tidak cocok. (Demo: atika / 123)');
+          return {
+            role: 'anggota',
+            id: found.id,
+            nama: found.nama,
+            username: found.username,
+            peran: found.peran,
+            status: found.status,
+          };
+        }
+      },
+
+      async logout() {
+        if (this.mode === 'supabase') {
+          try {
+            await this.client.auth.signOut();
+          } catch (_) {}
+        }
+        localStorage.removeItem(STORAGE_KEYS.SESSION);
+      },
+
+      // Generic CRUD operations
+      async upsertIuran(record) {
+        if (this.mode === 'supabase') {
+          const { error } = await this.client
+            .from('iuran_kas')
+            .upsert(record, { onConflict: 'anggota_id,tahun,bulan' });
+          if (error) throw new Error(error.message);
+        } else {
+          const store = this.getDemoStore();
+          const idx = store.iuran_kas.findIndex(
+            (x) => x.anggota_id === record.anggota_id && x.tahun === record.tahun && x.bulan === record.bulan
+          );
+          if (idx >= 0) store.iuran_kas[idx] = { ...store.iuran_kas[idx], ...record };
+          else store.iuran_kas.push({ id: generateUuid(), ...record });
+          this.saveDemoStore(store);
+        }
+      },
+
+      async deleteIuran(anggota_id, tahun, bulan) {
+        if (this.mode === 'supabase') {
+          const { error } = await this.client
+            .from('iuran_kas')
+            .delete()
+            .eq('anggota_id', anggota_id)
+            .eq('tahun', tahun)
+            .eq('bulan', bulan);
+          if (error) throw new Error(error.message);
+        } else {
+          const store = this.getDemoStore();
+          store.iuran_kas = store.iuran_kas.filter(
+            (x) => !(x.anggota_id === anggota_id && x.tahun === tahun && x.bulan === bulan)
+          );
+          this.saveDemoStore(store);
+        }
+      },
+
+      async upsertLebihBayar(record) {
+        if (this.mode === 'supabase') {
+          const { error } = await this.client
+            .from('saldo_lebih_bayar')
+            .upsert({ ...record, updated_at: new Date().toISOString() }, { onConflict: 'anggota_id,tahun' });
+          if (error) throw new Error(error.message);
+        } else {
+          const store = this.getDemoStore();
+          const idx = store.saldo_lebih_bayar.findIndex(
+            (x) => x.anggota_id === record.anggota_id && x.tahun === record.tahun
+          );
+          if (idx >= 0) store.saldo_lebih_bayar[idx] = { ...store.saldo_lebih_bayar[idx], ...record };
+          else store.saldo_lebih_bayar.push({ id: generateUuid(), ...record });
+          this.saveDemoStore(store);
+        }
+      },
+
+      async insertRow(table, payload) {
+        if (this.mode === 'supabase') {
+          const { data, error } = await this.client.from(table).insert(payload).select().single();
+          if (error) throw new Error(error.message);
+          return data;
+        } else {
+          const store = this.getDemoStore();
+          const row = { id: generateUuid(), ...payload };
+          store[table].push(row);
+          this.saveDemoStore(store);
+          return row;
+        }
+      },
+
+      async insertRows(table, payloads) {
+        if (!payloads.length) return;
+        if (this.mode === 'supabase') {
+          const { error } = await this.client.from(table).insert(payloads);
+          if (error) throw new Error(error.message);
+        } else {
+          const store = this.getDemoStore();
+          payloads.forEach((p) => store[table].push({ id: generateUuid(), ...p }));
+          this.saveDemoStore(store);
+        }
+      },
+
+      async updateRow(table, id, payload) {
+        if (this.mode === 'supabase') {
+          const { error } = await this.client.from(table).update(payload).eq('id', id);
+          if (error) throw new Error(error.message);
+        } else {
+          const store = this.getDemoStore();
+          const idx = store[table].findIndex((x) => x.id === id);
+          if (idx >= 0) store[table][idx] = { ...store[table][idx], ...payload };
+          this.saveDemoStore(store);
+        }
+      },
+
+      async deleteRow(table, id) {
+        if (this.mode === 'supabase') {
+          const { error } = await this.client.from(table).delete().eq('id', id);
+          if (error) throw new Error(error.message);
+        } else {
+          const store = this.getDemoStore();
+          store[table] = store[table].filter((x) => x.id !== id);
+          // Cascade manual di mode demo
+          if (table === 'anggota') {
+            store.iuran_kas = store.iuran_kas.filter((x) => x.anggota_id !== id);
+            store.saldo_lebih_bayar = store.saldo_lebih_bayar.filter((x) => x.anggota_id !== id);
+          } else if (table === 'patungan_event') {
+            store.patungan_peserta = store.patungan_peserta.filter((x) => x.patungan_id !== id);
+          }
+          this.saveDemoStore(store);
+        }
+      },
+    };
+
+    /* ============================================================================
+       GLOBAL APPLICATION STATE
+    ============================================================================ */
+    const State = {
+      session: null, // { role: 'admin'|'anggota', id, nama, ... }
+      loginTab: 'anggota', // 'anggota' | 'admin'
+      activePage: 'dashboard', // 'dashboard' | 'iuran' | 'transaksi' | 'patungan' | 'pengaturan'
+      loading: false,
+      data: {
+        periode_kas: [],
+        anggota: [],
+        iuran_kas: [],
+        saldo_lebih_bayar: [],
+        transaksi_kas: [],
+        patungan_event: [],
+        patungan_peserta: [],
+      },
+      // Filters
+      selectedYear: 2026,
+      iuranSearch: '',
+      iuranStatusFilter: 'Semua',
+      txYearFilter: '2026',
+      txMonthFilter: 'Semua',
+      txTypeFilter: 'Semua',
+      txSearch: '',
+      patYearFilter: 'Semua',
+      patStatusFilter: 'Semua',
+      activePatunganId: null,
+      settingsTab: 'anggota', // 'anggota' | 'periode' | 'supabase'
+      memberSearch: '',
+    };
+
+    function isAdmin() {
+      return State.session && State.session.role === 'admin';
+    }
+
+    function getTarifForYear(tahun) {
+      const p = State.data.periode_kas.find((x) => Number(x.tahun) === Number(tahun));
+      return p ? Number(p.tarif_bulanan) : 20000;
+    }
+
+    function getAvailableYears() {
+      const years = State.data.periode_kas.map((p) => Number(p.tahun)).sort((a, b) => a - b);
+      return years.length ? years : [2023, 2024, 2025, 2026];
+    }
+
+    /* ============================================================================
+       PERHITUNGAN KEUANGAN & REKAP TAHUNAN OTOMATIS
+    ============================================================================ */
+    function computeAnnualRecap() {
+      const years = getAvailableYears();
+      let runningSaldo = 0;
+      const rows = years.map((yr) => {
+        const periode = State.data.periode_kas.find((p) => Number(p.tahun) === yr);
+        const tarif = periode ? Number(periode.tarif_bulanan) : 0;
+
+        const totalIuran = State.data.iuran_kas
+          .filter((i) => Number(i.tahun) === yr)
+          .reduce((acc, cur) => acc + (Number(cur.nominal) || 0), 0);
+
+        const totalLebihBayar = State.data.saldo_lebih_bayar
+          .filter((lb) => Number(lb.tahun) === yr)
+          .reduce((acc, cur) => acc + (Number(cur.nominal) || 0), 0);
+
+        const totalMasukLain = State.data.transaksi_kas
+          .filter((t) => Number(t.tahun) === yr && t.tipe === 'masuk_lain')
+          .reduce((acc, cur) => acc + (Number(cur.nominal) || 0), 0);
+
+        const totalKeluar = State.data.transaksi_kas
+          .filter((t) => Number(t.tahun) === yr && t.tipe === 'keluar')
+          .reduce((acc, cur) => acc + (Number(cur.nominal) || 0), 0);
+
+        const totalMasuk = totalIuran + totalLebihBayar + totalMasukLain;
+        const saldoTahun = totalMasuk - totalKeluar;
+        runningSaldo += saldoTahun;
+
+        return {
+          tahun: yr,
+          tarif,
+          totalIuran,
+          totalLebihBayar,
+          totalMasukLain,
+          totalMasuk,
+          totalKeluar,
+          saldoTahun,
+          saldoKumulatif: runningSaldo,
+        };
+      });
+
+      const grandMasuk = rows.reduce((a, r) => a + r.totalMasuk, 0);
+      const grandKeluar = rows.reduce((a, r) => a + r.totalKeluar, 0);
+      const grandSaldo = grandMasuk - grandKeluar;
+
+      return { rows, grandMasuk, grandKeluar, grandSaldo };
+    }
+
+    function computePatunganStats(eventId) {
+      const ev = State.data.patungan_event.find((e) => e.id === eventId);
+      if (!ev) return { terkumpul: 0, targetTotal: 0, pengeluaran: 0, selisih: 0, lunasCount: 0, totalPeserta: 0 };
+      const list = State.data.patungan_peserta.filter((p) => p.patungan_id === eventId);
+      const terkumpul = list.reduce((a, p) => a + (Number(p.nominal_bayar) || 0), 0);
+      const targetTotal = list.reduce((a, p) => a + (Number(p.tarif_target) || 0), 0);
+      const pengeluaran = Number(ev.total_pengeluaran) || 0;
+      const selisih = terkumpul - pengeluaran;
+      const lunasCount = list.filter((p) => p.status_bayar === 'Lunas').length;
+      return { terkumpul, targetTotal, pengeluaran, selisih, lunasCount, totalPeserta: list.length };
+    }
+
+    /* ============================================================================
+       LOAD DATA & LIFECYCLE
+    ============================================================================ */
+    async function refreshData(silent = false) {
+      if (!silent) {
+        State.loading = true;
+        renderApp();
+      }
+      try {
+        const fetched = await DB.fetchAll();
+        State.data = fetched;
+        const years = getAvailableYears();
+        if (!years.includes(Number(State.selectedYear)) && years.length) {
+          State.selectedYear = years[years.length - 1];
+        }
+      } catch (err) {
+        showToast('Gagal memuat data: ' + err.message, 'error');
+      } finally {
+        State.loading = false;
+        renderApp();
+      }
+    }
+
+    async function bootstrap() {
+      DB.init();
+      // Cek sesi tersimpan
+      try {
+        const saved = localStorage.getItem(STORAGE_KEYS.SESSION);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (DB.mode === 'supabase' && parsed.role === 'admin') {
+            const { data } = await DB.client.auth.getSession();
+            if (data?.session) State.session = parsed;
+            else localStorage.removeItem(STORAGE_KEYS.SESSION);
+          } else {
+            State.session = parsed;
+          }
+        }
+      } catch (_) {}
+
+      if (State.session) {
+        await refreshData();
+      } else {
+        renderApp();
+      }
+    }
+
+    /* ============================================================================
+       MAIN RENDERER
+    ============================================================================ */
+    function renderApp() {
+      const root = document.getElementById('app-root');
+      if (!State.session) {
+        root.innerHTML = renderLoginScreen();
+      } else {
+        root.innerHTML = renderShell();
+      }
+      if (window.lucide) lucide.createIcons();
+    }
+
+    /* ============================================================================
+       1. HALAMAN LOGIN (HYBRID AUTH GLASSMORPHISM)
+    ============================================================================ */
+    function renderLoginScreen() {
+      const isAnggotaTab = State.loginTab === 'anggota';
+      const isDemo = DB.mode === 'demo';
+
+      return `
+        <div class="w-full h-full overflow-y-auto flex flex-col items-center justify-center p-4 sm:p-6">
+          <div class="w-full max-w-md my-auto animate-fade-up">
+            <!-- Mode Status Pill -->
+            <div class="flex justify-center mb-4">
+              <button onclick="openSupabaseConfigModal()" class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition hover:shadow-sm ${
+                isDemo
+                  ? 'bg-amber-50/90 border-amber-200 text-amber-800 hover:bg-amber-100/80'
+                  : 'bg-emerald-50/90 border-emerald-200 text-emerald-800 hover:bg-emerald-100/80'
+              }">
+                <span class="w-2 h-2 rounded-full ${isDemo ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}"></span>
+                <span>${isDemo ? 'Mode Preview Demo (Lokal)' : 'Terhubung ke Supabase Live'}</span>
+                <i data-lucide="settings-2" class="w-3.5 h-3.5 opacity-75"></i>
+              </button>
+            </div>
+
+            <!-- Glassmorphism Login Card -->
+            <div class="rounded-3xl bg-white/85 backdrop-blur-xl border border-white/80 shadow-float p-6 sm:p-8">
+              <!-- Brand Header -->
+              <div class="text-center mb-6">
+                <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-teal-700 to-sky-600 text-white flex items-center justify-center mx-auto shadow-md mb-3.5">
+                  <i data-lucide="wallet" class="w-7 h-7"></i>
+                </div>
+                <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">KAS IPD 32</h1>
+                <p class="text-sm text-slate-500 mt-1">Transparansi Iuran, Buku Kas & Patungan Ruangan</p>
+              </div>
+
+              <!-- Hybrid Tab Switcher -->
+              <div class="grid grid-cols-2 p-1 rounded-2xl bg-slate-100/90 border border-slate-200/70 mb-6">
+                <button
+                  onclick="State.loginTab='anggota'; renderApp();"
+                  class="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+                    isAnggotaTab
+                      ? 'bg-white text-teal-700 shadow-sm'
+                      : 'text-slate-500 hover:text-slate-700'
+                  }">
+                  <i data-lucide="users" class="w-4 h-4"></i>
+                  <span>Anggota</span>
+                </button>
+                <button
+                  onclick="State.loginTab='admin'; renderApp();"
+                  class="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+                    !isAnggotaTab
+                      ? 'bg-white text-teal-700 shadow-sm'
+                      : 'text-slate-500 hover:text-slate-700'
+                  }">
+                  <i data-lucide="shield-check" class="w-4 h-4"></i>
+                  <span>Admin / Bendahara</span>
+                </button>
+              </div>
+
+              <!-- Form Login -->
+              <form onsubmit="handleLoginSubmit(event)" class="space-y-4">
+                <div>
+                  <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                    ${isAnggotaTab ? 'Username Anggota' : 'Email Admin (Supabase Auth)'}
+                  </label>
+                  <div class="relative">
+                    <i data-lucide="${isAnggotaTab ? 'user' : 'mail'}" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
+                    <input
+                      id="login-identifier"
+                      type="${isAnggotaTab ? 'text' : 'email'}"
+                      required
+                      autocomplete="username"
+                      placeholder="${isAnggotaTab ? 'Contoh: atika' : 'bendahara@ipd32.id'}"
+                      value="${isDemo ? (isAnggotaTab ? 'atika' : 'bendahara@ipd32.id') : ''}"
+                      class="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-white/90 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25 focus:border-teal-600 transition"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                    Password
+                  </label>
+                  <div class="relative">
+                    <i data-lucide="lock" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
+                    <input
+                      id="login-password"
+                      type="password"
+                      required
+                      autocomplete="current-password"
+                      placeholder="Masukkan password"
+                      value="${isDemo ? '123' : ''}"
+                      class="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-white/90 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25 focus:border-teal-600 transition"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  id="login-submit-btn"
+                  class="w-full py-3 px-4 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-semibold text-sm shadow-sm transition-all active:scale-[0.98] flex items-center justify-center gap-2">
+                  <i data-lucide="log-in" class="w-4 h-4"></i>
+                  <span>${isAnggotaTab ? 'Masuk sebagai Anggota (Read-Only)' : 'Masuk sebagai Admin (Full Akses)'}</span>
+                </button>
+              </form>
+
+              ${
+                isDemo
+                  ? `
+                  <div class="mt-5 p-3.5 rounded-2xl bg-sky-50/80 border border-sky-200/70 text-xs text-sky-900 space-y-1.5">
+                    <div class="font-bold flex items-center gap-1.5 text-sky-800">
+                      <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+                      <span>Akses Cepat Mode Demo</span>
+                    </div>
+                    <p class="text-sky-700 leading-relaxed">
+                      Kredensial demo sudah terisi otomatis. Anda dapat mencoba role <b>Admin</b> (edit/input penuh) maupun <b>Anggota</b> (<code class="bg-white/70 px-1 rounded">atika</code> / <code class="bg-white/70 px-1 rounded">123</code>).
+                    </p>
+                  </div>
+                `
+                  : ''
+              }
+
+              <div class="mt-6 pt-4 border-t border-slate-200/80 flex items-center justify-between text-xs text-slate-500">
+                <button onclick="openSupabaseConfigModal()" class="inline-flex items-center gap-1.5 font-semibold text-teal-700 hover:text-teal-800">
+                  <i data-lucide="database" class="w-3.5 h-3.5"></i>
+                  <span>Konfigurasi Supabase</span>
+                </button>
+                <button onclick="openSqlGuideModal()" class="inline-flex items-center gap-1.5 font-semibold text-sky-600 hover:text-sky-700">
+                  <i data-lucide="code-2" class="w-3.5 h-3.5"></i>
+                  <span>Salin SQL Tabel</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function handleLoginSubmit(e) {
+      e.preventDefault();
+      const identifier = document.getElementById('login-identifier')?.value || '';
+      const password = document.getElementById('login-password')?.value || '';
+      const btn = document.getElementById('login-submit-btn');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<span class="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span><span>Memverifikasi...</span>`;
+      }
+
+      try {
+        const session =
+          State.loginTab === 'admin'
+            ? await DB.loginAdmin(identifier, password)
+            : await DB.loginAnggota(identifier, password);
+
+        State.session = session;
+        State.activePage = 'dashboard';
+        localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(session));
+        showToast(`Selamat datang, ${session.nama}!`, 'success');
+        await refreshData();
+      } catch (err) {
+        showToast(err.message || 'Login gagal.', 'error');
+        renderApp();
+      }
+    }
+
+    async function handleLogout() {
+      openConfirmModal({
+        title: 'Keluar dari Aplikasi?',
+        message: 'Sesi Anda saat ini akan diakhiri dan Anda akan kembali ke halaman login.',
+        confirmLabel: 'Keluar',
+        danger: true,
+        onConfirm: async () => {
+          await DB.logout();
+          State.session = null;
+          State.activePatunganId = null;
+          showToast('Anda telah keluar.', 'info');
+          renderApp();
+        },
+      });
+    }
+
+    /* ============================================================================
+       2. APP SHELL (DESKTOP SIDEBAR + MOBILE FLOATING BOTTOM NAV)
+    ============================================================================ */
+    function getNavItems() {
+      const items = [
+        { id: 'dashboard', label: 'Dashboard', short: 'Beranda', icon: 'layout-dashboard' },
+        { id: 'iuran', label: 'Matriks Iuran', short: 'Iuran', icon: 'calendar-check-2' },
+        { id: 'transaksi', label: 'Buku Kas', short: 'Buku Kas', icon: 'arrow-left-right' },
+        { id: 'patungan', label: 'Patungan & Acara', short: 'Patungan', icon: 'heart-handshake' },
+      ];
+      if (isAdmin()) {
+        items.push({ id: 'pengaturan', label: 'Anggota & Sistem', short: 'Kelola', icon: 'settings' });
+      }
+      return items;
+    }
+
+    function navigateTo(pageId) {
+      State.activePage = pageId;
+      if (pageId !== 'patungan') State.activePatunganId = null;
+      renderApp();
+      const scroller = document.getElementById('main-scroll-area');
+      if (scroller) scroller.scrollTop = 0;
+    }
+
+    function renderShell() {
+      const navItems = getNavItems();
+      const admin = isAdmin();
+      const isDemo = DB.mode === 'demo';
+      const pageTitles = {
+        dashboard: 'Dashboard & Rekap Tahunan',
+        iuran: 'Matriks Iuran Kas 12 Bulan',
+        transaksi: 'Pemasukan Lain & Pengeluaran',
+        patungan: 'Patungan & Acara Ruangan',
+        pengaturan: 'Anggota, Periode & Supabase',
+      };
+
+      return `
+        <!-- DESKTOP FIXED LEFT SIDEBAR (>= 1024px) -->
+        <aside class="hidden lg:flex flex-col w-[264px] shrink-0 h-full bg-white/80 backdrop-blur-xl border-r border-slate-200/80 p-4">
+          <!-- Brand -->
+          <div class="flex items-center gap-3 px-2 py-2 mb-5">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-teal-700 to-sky-600 text-white flex items-center justify-center shadow-sm shrink-0">
+              <i data-lucide="wallet" class="w-5 h-5"></i>
+            </div>
+            <div class="min-w-0">
+              <div class="text-base font-extrabold tracking-tight text-slate-900 leading-tight">KAS IPD 32</div>
+              <div class="flex items-center gap-1.5 mt-0.5">
+                <span class="w-1.5 h-1.5 rounded-full ${isDemo ? 'bg-amber-500' : 'bg-emerald-500'}"></span>
+                <span class="text-[11px] font-semibold text-slate-500 truncate">${isDemo ? 'Mode Demo Lokal' : 'Supabase Live'}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Navigation Links -->
+          <nav class="flex-1 space-y-1.5 overflow-y-auto">
+            ${navItems
+              .map((item) => {
+                const active = State.activePage === item.id;
+                return `
+                  <button
+                    onclick="navigateTo('${item.id}')"
+                    class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold transition-all active:scale-[0.98] ${
+                      active
+                        ? 'bg-teal-700 text-white shadow-sm'
+                        : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900'
+                    }">
+                    <i data-lucide="${item.icon}" class="w-4 h-4 shrink-0"></i>
+                    <span class="truncate">${item.label}</span>
+                  </button>
+                `;
+              })
+              .join('')}
+          </nav>
+
+          <!-- User Profile Card -->
+          <div class="mt-4 pt-4 border-t border-slate-200/80 space-y-2.5">
+            <div class="p-3 rounded-2xl bg-slate-50/90 border border-slate-200/70 flex items-center gap-3">
+              <div class="w-9 h-9 rounded-xl ${
+                admin ? 'bg-teal-100 text-teal-700' : 'bg-sky-100 text-sky-700'
+              } flex items-center justify-center font-bold text-sm shrink-0">
+                ${escapeHtml((State.session.nama || 'U').charAt(0).toUpperCase())}
+              </div>
+              <div class="min-w-0 flex-1">
+                <div class="text-xs font-bold text-slate-900 truncate">${escapeHtml(State.session.nama)}</div>
+                <div class="text-[11px] font-semibold ${admin ? 'text-teal-700' : 'text-sky-600'}">
+                  ${admin ? 'Admin / Bendahara' : 'Anggota (Read-Only)'}
+                </div>
+              </div>
+            </div>
+            <button
+              onclick="handleLogout()"
+              class="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 transition active:scale-[0.98]">
+              <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
+              <span>Keluar Aplikasi</span>
+            </button>
+          </div>
+        </aside>
+
+        <!-- MAIN WORKSPACE -->
+        <div class="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
+          <!-- Mobile Compact Top Bar (< 1024px) -->
+          <header class="lg:hidden shrink-0 px-4 py-3 bg-white/85 backdrop-blur-xl border-b border-slate-200/80 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2.5 min-w-0">
+              <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-teal-700 to-sky-600 text-white flex items-center justify-center shrink-0">
+                <i data-lucide="wallet" class="w-4 h-4"></i>
+              </div>
+              <div class="min-w-0">
+                <div class="text-sm font-extrabold text-slate-900 truncate">${pageTitles[State.activePage] || 'KAS IPD 32'}</div>
+                <div class="text-[11px] text-slate-500 truncate">
+                  ${escapeHtml(State.session.nama)} • ${admin ? 'Admin' : 'Anggota'}
+                </div>
+              </div>
+            </div>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <button onclick="refreshData()" title="Muat Ulang" class="p-2 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200">
+                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+              </button>
+              <button onclick="handleLogout()" title="Keluar" class="p-2 rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-100">
+                <i data-lucide="log-out" class="w-4 h-4"></i>
+              </button>
+            </div>
+          </header>
+
+          <!-- Scrollable Content Area -->
+          <main id="main-scroll-area" class="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-8 pb-24 lg:pb-8">
+            <div class="max-w-[1440px] mx-auto w-full">
+              ${
+                State.loading
+                  ? renderLoadingSkeleton()
+                  : State.activePage === 'dashboard'
+                  ? renderDashboardPage()
+                  : State.activePage === 'iuran'
+                  ? renderIuranPage()
+                  : State.activePage === 'transaksi'
+                  ? renderTransaksiPage()
+                  : State.activePage === 'patungan'
+                  ? renderPatunganPage()
+                  : renderPengaturanPage()
+              }
+            </div>
+          </main>
+
+          <!-- MOBILE FLOATING BOTTOM NAVIGATION BAR (< 1024px) -->
+          <nav class="lg:hidden fixed bottom-3 left-3 right-3 z-40 rounded-2xl bg-white/90 backdrop-blur-xl border border-slate-200/80 shadow-float px-2 py-1.5">
+            <div class="grid ${navItems.length === 5 ? 'grid-cols-5' : 'grid-cols-4'} gap-1">
+              ${navItems
+                .map((item) => {
+                  const active = State.activePage === item.id;
+                  return `
+                    <button
+                      onclick="navigateTo('${item.id}')"
+                      class="flex flex-col items-center justify-center py-2 px-1 rounded-xl transition-all active:scale-95 ${
+                        active ? 'bg-teal-50 text-teal-700' : 'text-slate-500 hover:text-slate-700'
+                      }">
+                      <i data-lucide="${item.icon}" class="w-4 h-4 mb-0.5 ${active ? 'stroke-[2.25]' : ''}"></i>
+                      <span class="text-[10px] font-bold truncate max-w-full">${item.short}</span>
+                    </button>
+                  `;
+                })
+                .join('')}
+            </div>
+          </nav>
+        </div>
+      `;
+    }
+
+    function renderLoadingSkeleton() {
+      return `
+        <div class="space-y-6 animate-pulse">
+          <div class="h-8 w-64 bg-slate-200/80 rounded-xl"></div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            ${[1, 2, 3, 4].map(() => `<div class="h-28 rounded-2xl bg-white/70 border border-slate-200/60"></div>`).join('')}
+          </div>
+          <div class="h-72 rounded-2xl bg-white/70 border border-slate-200/60"></div>
+        </div>
+      `;
+    }
+
+    /* ============================================================================
+       3. PAGE: DASHBOARD & REKAP KAS TAHUNAN
+    ============================================================================ */
+    function renderDashboardPage() {
+      const recap = computeAnnualRecap();
+      const activeYr = Number(State.selectedYear);
+      const tarifActive = getTarifForYear(activeYr);
+      const activeMembers = State.data.anggota.filter((a) => a.status === 'Aktif');
+      const targetBulanIni = Math.min(12, new Date().getFullYear() === activeYr ? new Date().getMonth() + 1 : 12);
+      const expectedSlots = activeMembers.length * targetBulanIni;
+      const paidSlots = State.data.iuran_kas.filter(
+        (i) => Number(i.tahun) === activeYr && activeMembers.some((m) => m.id === i.anggota_id) && i.bulan <= targetBulanIni && Number(i.nominal) > 0
+      ).length;
+      const progressPct = expectedSlots > 0 ? Math.min(100, Math.round((paidSlots / expectedSlots) * 100)) : 0;
+
+      const recentTx = [...State.data.transaksi_kas]
+        .sort((a, b) => (b.tanggal || '').localeCompare(a.tanggal || ''))
+        .slice(0, 6);
+
+      // Kartu status iuran pribadi jika login sebagai Anggota
+      let personalCardHtml = '';
+      if (!isAdmin() && State.session?.id) {
+        const myIuran = State.data.iuran_kas.filter(
+          (i) => i.anggota_id === State.session.id && Number(i.tahun) === activeYr && Number(i.nominal) > 0
+        );
+        const myTotal = myIuran.reduce((a, b) => a + Number(b.nominal), 0);
+        const myLebih = State.data.saldo_lebih_bayar.find(
+          (l) => l.anggota_id === State.session.id && Number(l.tahun) === activeYr
+        );
+        const paidMonthNums = new Set(myIuran.map((x) => Number(x.bulan)));
+        const belumBulan = MONTHS.filter((m) => m.num <= targetBulanIni && !paidMonthNums.has(m.num)).map((m) => m.short);
+
+        personalCardHtml = `
+          <div class="glass-card rounded-2xl p-5 mb-6 border-l-4 border-l-teal-700 animate-fade-up">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <div class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-teal-50 text-teal-700 text-xs font-bold mb-2">
+                  <i data-lucide="user-check" class="w-3.5 h-3.5"></i>
+                  <span>Status Iuran Pribadi • ${activeYr}</span>
+                </div>
+                <h2 class="text-lg font-bold text-slate-900">Halo, ${escapeHtml(State.session.nama)}</h2>
+                <p class="text-sm text-slate-600 mt-0.5">
+                  Tercatat <b>${myIuran.length} dari 12 bulan</b> terbayar (${formatRp(myTotal)})
+                  ${myLebih && myLebih.nominal > 0 ? `• Lebih Bayar: <b class="text-emerald-700">${formatRp(myLebih.nominal)}</b>` : ''}.
+                </p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                ${
+                  belumBulan.length === 0
+                    ? `<span class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-50 text-emerald-700 text-xs font-bold"><i data-lucide="check-circle-2" class="w-4 h-4"></i>Lunas s.d. Bulan ${MONTHS[targetBulanIni - 1].short}</span>`
+                    : `<span class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-50 text-amber-800 text-xs font-bold"><i data-lucide="clock" class="w-4 h-4"></i>Belum Bayar: ${belumBulan.join(', ')}</span>`
+                }
+                <button onclick="navigateTo('iuran')" class="px-3.5 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold transition">
+                  Lihat Matriks
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      const maxBarVal = Math.max(1, ...recap.rows.map((r) => Math.max(r.totalMasuk, r.totalKeluar)));
+
+      return `
+        <div class="space-y-6 animate-fade-up">
+          <!-- Page Header -->
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Dashboard & Rekap Tahunan</h1>
+              <p class="text-sm text-slate-500 mt-0.5">Ringkasan kas kumulatif IPD 32 lintas periode (${getAvailableYears()[0]}–${getAvailableYears().slice(-1)[0]})</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <button onclick="refreshData()" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                <span>Refresh</span>
+              </button>
+              ${
+                isAdmin()
+                  ? `
+                  <button onclick="openTransaksiModal()" class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm transition active:scale-[0.98]">
+                    <i data-lucide="plus" class="w-4 h-4"></i>
+                    <span>Catat Transaksi</span>
+                  </button>
+                `
+                  : ''
+              }
+            </div>
+          </div>
+
+          ${personalCardHtml}
+
+          <!-- 4 KPI Cards -->
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <!-- KPI 1: Saldo Kumulatif -->
+            <div class="glass-card rounded-2xl p-4 sm:p-5">
+              <div class="flex items-center justify-between gap-2 mb-3">
+                <span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Saldo Kumulatif</span>
+                <div class="w-9 h-9 rounded-xl ${
+                  recap.grandSaldo >= 0 ? 'bg-teal-50 text-teal-700' : 'bg-rose-50 text-rose-700'
+                } flex items-center justify-center shrink-0">
+                  <i data-lucide="landmark" class="w-4 h-4"></i>
+                </div>
+              </div>
+              <div class="text-xl sm:text-2xl font-extrabold tabular-nums ${
+                recap.grandSaldo >= 0 ? 'text-slate-900' : 'text-rose-700'
+              }">
+                ${formatRp(recap.grandSaldo)}
+              </div>
+              <div class="text-xs text-slate-500 mt-1.5">
+                ${recap.grandSaldo < 0 ? 'Defisit kas berjalan' : 'Posisi kas surplus'}
+              </div>
+            </div>
+
+            <!-- KPI 2: Total Pemasukan -->
+            <div class="glass-card rounded-2xl p-4 sm:p-5">
+              <div class="flex items-center justify-between gap-2 mb-3">
+                <span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Total Masuk</span>
+                <div class="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                  <i data-lucide="trending-up" class="w-4 h-4"></i>
+                </div>
+              </div>
+              <div class="text-xl sm:text-2xl font-extrabold tabular-nums text-emerald-700">
+                ${formatRp(recap.grandMasuk)}
+              </div>
+              <div class="text-xs text-slate-500 mt-1.5">Iuran + Lebih Bayar + Lainnya</div>
+            </div>
+
+            <!-- KPI 3: Total Pengeluaran -->
+            <div class="glass-card rounded-2xl p-4 sm:p-5">
+              <div class="flex items-center justify-between gap-2 mb-3">
+                <span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Total Keluar</span>
+                <div class="w-9 h-9 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center shrink-0">
+                  <i data-lucide="trending-down" class="w-4 h-4"></i>
+                </div>
+              </div>
+              <div class="text-xl sm:text-2xl font-extrabold tabular-nums text-rose-700">
+                ${formatRp(recap.grandKeluar)}
+              </div>
+              <div class="text-xs text-slate-500 mt-1.5">Operasional, sosial & adm bank</div>
+            </div>
+
+            <!-- KPI 4: Progres Iuran Tahun Aktif -->
+            <div class="glass-card rounded-2xl p-4 sm:p-5">
+              <div class="flex items-center justify-between gap-2 mb-3">
+                <span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Iuran ${activeYr}</span>
+                <div class="w-9 h-9 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
+                  <i data-lucide="pie-chart" class="w-4 h-4"></i>
+                </div>
+              </div>
+              <div class="flex items-baseline gap-2">
+                <span class="text-xl sm:text-2xl font-extrabold tabular-nums text-slate-900">${progressPct}%</span>
+                <span class="text-xs font-semibold text-slate-500">${activeMembers.length} aktif</span>
+              </div>
+              <div class="w-full h-2 rounded-full bg-slate-100 mt-2 overflow-hidden">
+                <div class="h-full rounded-full bg-gradient-to-r from-teal-600 to-sky-500 transition-all" style="width:${progressPct}%"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Rekap Kas Tahunan Table (Mirip Sheet REKAP KAS TAHUNAN) -->
+          <div class="glass-card rounded-2xl overflow-hidden">
+            <div class="p-5 border-b border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h2 class="text-base font-bold text-slate-900">Rekap Kas Tahunan Otomatis</h2>
+                <p class="text-xs text-slate-500 mt-0.5">Terhitung otomatis dari seluruh iuran, saldo lebih bayar, pemasukan lain, dan pengeluaran</p>
+              </div>
+              <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-slate-600 text-xs font-semibold w-fit">
+                Tarif ${activeYr}: ${formatRp(tarifActive)}/bln
+              </span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse min-w-[760px]">
+                <thead>
+                  <tr class="bg-slate-50/90 border-b border-slate-200/80 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    <th class="py-3.5 px-4">Tahun</th>
+                    <th class="py-3.5 px-4 text-right">Tarif/Bln</th>
+                    <th class="py-3.5 px-4 text-right">Iuran Anggota</th>
+                    <th class="py-3.5 px-4 text-right">Lebih Bayar</th>
+                    <th class="py-3.5 px-4 text-right">Masuk Lain</th>
+                    <th class="py-3.5 px-4 text-right">Total Masuk</th>
+                    <th class="py-3.5 px-4 text-right">Total Keluar</th>
+                    <th class="py-3.5 px-4 text-right">Saldo Tahun</th>
+                    <th class="py-3.5 px-4 text-right">Kumulatif</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-200/70 text-sm">
+                  ${recap.rows
+                    .map(
+                      (r) => `
+                    <tr class="hover:bg-slate-50/70 transition">
+                      <td class="py-3.5 px-4 font-bold text-slate-900">
+                        <button onclick="State.selectedYear=${r.tahun}; navigateTo('iuran')" class="inline-flex items-center gap-1.5 text-teal-700 hover:underline">
+                          <span>${r.tahun}</span>
+                          <i data-lucide="arrow-up-right" class="w-3.5 h-3.5"></i>
+                        </button>
+                      </td>
+                      <td class="py-3.5 px-4 text-right tabular-nums text-slate-600">${formatRp(r.tarif)}</td>
+                      <td class="py-3.5 px-4 text-right tabular-nums text-slate-700">${formatRp(r.totalIuran)}</td>
+                      <td class="py-3.5 px-4 text-right tabular-nums text-slate-600">${formatRp(r.totalLebihBayar)}</td>
+                      <td class="py-3.5 px-4 text-right tabular-nums text-sky-700 font-medium">${formatRp(r.totalMasukLain)}</td>
+                      <td class="py-3.5 px-4 text-right tabular-nums font-semibold text-emerald-700">${formatRp(r.totalMasuk)}</td>
+                      <td class="py-3.5 px-4 text-right tabular-nums font-semibold text-rose-700">${formatRp(r.totalKeluar)}</td>
+                      <td class="py-3.5 px-4 text-right tabular-nums font-bold ${r.saldoTahun >= 0 ? 'text-emerald-700' : 'text-rose-700'}">
+                        ${formatRp(r.saldoTahun, true)}
+                      </td>
+                      <td class="py-3.5 px-4 text-right tabular-nums font-extrabold ${r.saldoKumulatif >= 0 ? 'text-slate-900' : 'text-rose-700'}">
+                        ${formatRp(r.saldoKumulatif)}
+                      </td>
+                    </tr>
+                  `
+                    )
+                    .join('')}
+                </tbody>
+                <tfoot>
+                  <tr class="bg-slate-100/80 border-t-2 border-slate-200 text-sm font-extrabold text-slate-900">
+                    <td class="py-3.5 px-4" colspan="5">TOTAL KUMULATIF (${getAvailableYears()[0]}–${getAvailableYears().slice(-1)[0]})</td>
+                    <td class="py-3.5 px-4 text-right tabular-nums text-emerald-700">${formatRp(recap.grandMasuk)}</td>
+                    <td class="py-3.5 px-4 text-right tabular-nums text-rose-700">${formatRp(recap.grandKeluar)}</td>
+                    <td class="py-3.5 px-4 text-right tabular-nums" colspan="2">
+                      <span class="${recap.grandSaldo >= 0 ? 'text-teal-700' : 'text-rose-700'}">${formatRp(recap.grandSaldo)}</span>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+
+          <!-- Grid Bawah: Grafik Perbandingan Tahunan & Transaksi Terbaru -->
+          <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+            <!-- Grafik Perbandingan Masuk vs Keluar -->
+            <div class="glass-card rounded-2xl p-5 lg:col-span-2 flex flex-col justify-between">
+              <div>
+                <h3 class="text-base font-bold text-slate-900">Arus Kas Per Tahun</h3>
+                <p class="text-xs text-slate-500 mt-0.5">Perbandingan Pemasukan vs Pengeluaran</p>
+              </div>
+              <div class="space-y-4 my-5">
+                ${recap.rows
+                  .map((r) => {
+                    const inW = Math.max(4, Math.round((r.totalMasuk / maxBarVal) * 100));
+                    const outW = Math.max(4, Math.round((r.totalKeluar / maxBarVal) * 100));
+                    return `
+                      <div>
+                        <div class="flex items-center justify-between text-xs mb-1.5">
+                          <span class="font-bold text-slate-800">${r.tahun}</span>
+                          <span class="tabular-nums text-slate-500">${formatCompactRp(r.totalMasuk)} / ${formatCompactRp(r.totalKeluar)}</span>
+                        </div>
+                        <div class="space-y-1">
+                          <div class="h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                            <div class="h-full rounded-full bg-emerald-500" style="width:${inW}%"></div>
+                          </div>
+                          <div class="h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                            <div class="h-full rounded-full bg-rose-400" style="width:${outW}%"></div>
+                          </div>
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join('')}
+              </div>
+              <div class="flex items-center gap-4 text-xs font-semibold text-slate-600 pt-3 border-t border-slate-200/70">
+                <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>Pemasukan</span>
+                <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-400"></span>Pengeluaran</span>
+              </div>
+            </div>
+
+            <!-- Transaksi Terbaru -->
+            <div class="glass-card rounded-2xl p-5 lg:col-span-3">
+              <div class="flex items-center justify-between gap-2 mb-4">
+                <div>
+                  <h3 class="text-base font-bold text-slate-900">Transaksi Kas Terbaru</h3>
+                  <p class="text-xs text-slate-500 mt-0.5">Pemasukan non-iuran & pengeluaran terakhir</p>
+                </div>
+                <button onclick="navigateTo('transaksi')" class="text-xs font-bold text-teal-700 hover:underline">
+                  Lihat Semua →
+                </button>
+              </div>
+              ${
+                recentTx.length === 0
+                  ? `<div class="py-10 text-center text-sm text-slate-400">Belum ada transaksi tercatat.</div>`
+                  : `
+                  <div class="divide-y divide-slate-200/70">
+                    ${recentTx
+                      .map((tx) => {
+                        const isIn = tx.tipe === 'masuk_lain';
+                        return `
+                          <div class="py-3 flex items-center justify-between gap-3">
+                            <div class="flex items-center gap-3 min-w-0">
+                              <div class="w-9 h-9 rounded-xl ${
+                                isIn ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                              } flex items-center justify-center shrink-0">
+                                <i data-lucide="${isIn ? 'arrow-down-left' : 'arrow-up-right'}" class="w-4 h-4"></i>
+                              </div>
+                              <div class="min-w-0">
+                                <div class="text-sm font-semibold text-slate-900 truncate">${escapeHtml(tx.deskripsi)}</div>
+                                <div class="text-xs text-slate-500 flex items-center gap-1.5 mt-0.5">
+                                  <span>${formatDateId(tx.tanggal)}</span>
+                                  <span>•</span>
+                                  <span class="font-medium text-slate-600">${escapeHtml(tx.kategori)}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div class="text-sm font-bold tabular-nums shrink-0 ${isIn ? 'text-emerald-700' : 'text-rose-700'}">
+                              ${isIn ? '+' : '-'}${formatRp(tx.nominal)}
+                            </div>
+                          </div>
+                        `;
+                      })
+                      .join('')}
+                  </div>
+                `
+              }
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    /* ============================================================================
+       4. PAGE: MATRIKS IURAN KAS 12 BULAN
+    ============================================================================ */
+    function renderIuranPage() {
+      const years = getAvailableYears();
+      const activeYr = Number(State.selectedYear);
+      const tarif = getTarifForYear(activeYr);
+      const admin = isAdmin();
+      const currentMonthCap = new Date().getFullYear() === activeYr ? new Date().getMonth() + 1 : 12;
+
+      // Index pembayaran untuk pencarian cepat O(1)
+      const iuranMap = {};
+      State.data.iuran_kas
+        .filter((i) => Number(i.tahun) === activeYr)
+        .forEach((i) => {
+          iuranMap[`${i.anggota_id}_${i.bulan}`] = i;
+        });
+
+      const lebihMap = {};
+      State.data.saldo_lebih_bayar
+        .filter((l) => Number(l.tahun) === activeYr)
+        .forEach((l) => {
+          lebihMap[l.anggota_id] = l;
+        });
+
+      // Filter anggota
+      const searchQ = State.iuranSearch.trim().toLowerCase();
+      const rows = State.data.anggota
+        .map((m) => {
+          let paidCount = 0;
+          let totalBayar = 0;
+          for (let b = 1; b <= 12; b++) {
+            const cell = iuranMap[`${m.id}_${b}`];
+            if (cell && Number(cell.nominal) > 0) {
+              paidCount++;
+              totalBayar += Number(cell.nominal);
+            }
+          }
+          const lebihObj = lebihMap[m.id];
+          const lebihNominal = lebihObj ? Number(lebihObj.nominal) : 0;
+          const isLunasCap = m.status === 'Aktif' && paidCount >= currentMonthCap;
+          const derivedStatus =
+            m.status !== 'Aktif' ? m.status : isLunasCap ? 'Lunas' : 'Kurang Bayar';
+
+          return { member: m, paidCount, totalBayar, lebihNominal, lebihObj, derivedStatus };
+        })
+        .filter((r) => {
+          if (searchQ && !r.member.nama.toLowerCase().includes(searchQ)) return false;
+          if (State.iuranStatusFilter === 'Semua') return true;
+          if (State.iuranStatusFilter === 'Aktif') return r.member.status === 'Aktif';
+          if (State.iuranStatusFilter === 'Lunas') return r.derivedStatus === 'Lunas';
+          if (State.iuranStatusFilter === 'Kurang Bayar') return r.derivedStatus === 'Kurang Bayar';
+          if (State.iuranStatusFilter === 'Non-Aktif') return r.member.status !== 'Aktif';
+          return true;
+        });
+
+      // Hitung total per bulan di footer
+      const monthTotals = Array(13).fill(0);
+      let grandIuran = 0;
+      let grandLebih = 0;
+      rows.forEach((r) => {
+        grandIuran += r.totalBayar;
+        grandLebih += r.lebihNominal;
+        for (let b = 1; b <= 12; b++) {
+          const c = iuranMap[`${r.member.id}_${b}`];
+          if (c) monthTotals[b] += Number(c.nominal) || 0;
+        }
+      });
+
+      const statusPill = (st) => {
+        if (st === 'Lunas') return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/70">Lunas</span>`;
+        if (st === 'Kurang Bayar') return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200/70">Kurang</span>`;
+        return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200/70">${escapeHtml(st)}</span>`;
+      };
+
+      return `
+        <div class="space-y-5 animate-fade-up">
+          <!-- Header -->
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Matriks Iuran Kas ${activeYr}</h1>
+              <p class="text-sm text-slate-500 mt-0.5">
+                Tarif wajib: <b class="text-teal-700 tabular-nums">${formatRp(tarif)} / bulan</b>
+                ${admin ? ' • Klik sel bulan atau kolom Lebih Bayar untuk input cepat' : ' • Mode Transparansi Anggota'}
+              </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <button onclick="exportIuranCsv()" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition">
+                <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                <span>Ekspor CSV</span>
+              </button>
+              ${
+                admin
+                  ? `
+                  <button onclick="State.settingsTab='periode'; navigateTo('pengaturan')" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm transition">
+                    <i data-lucide="sliders-horizontal" class="w-3.5 h-3.5"></i>
+                    <span>Atur Tarif / Tahun</span>
+                  </button>
+                `
+                  : ''
+              }
+            </div>
+          </div>
+
+          <!-- Top Action & Filter Bar -->
+          <div class="glass-card rounded-2xl p-3.5 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <!-- Year Selector -->
+              <div class="relative">
+                <select
+                  onchange="State.selectedYear=Number(this.value); renderApp();"
+                  class="pl-3.5 pr-8 py-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-600/25">
+                  ${years.map((y) => `<option value="${y}" ${y === activeYr ? 'selected' : ''}>Tahun ${y}</option>`).join('')}
+                </select>
+              </div>
+
+              <!-- Status Filter Pills -->
+              <div class="flex items-center gap-1 flex-wrap">
+                ${['Semua', 'Lunas', 'Kurang Bayar', 'Non-Aktif']
+                  .map(
+                    (st) => `
+                  <button
+                    onclick="State.iuranStatusFilter='${st}'; renderApp();"
+                    class="px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+                      State.iuranStatusFilter === st
+                        ? 'bg-teal-700 text-white shadow-sm'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200/80'
+                    }">
+                    ${st}
+                  </button>
+                `
+                  )
+                  .join('')}
+              </div>
+            </div>
+
+            <!-- Search Input -->
+            <div class="relative md:w-64">
+              <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+              <input
+                type="text"
+                value="${escapeHtml(State.iuranSearch)}"
+                oninput="State.iuranSearch=this.value; renderApp();"
+                placeholder="Cari nama anggota..."
+                class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25"
+              />
+            </div>
+          </div>
+
+          <!-- 12-Month Matrix Table -->
+          <div class="glass-card rounded-2xl overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse min-w-[1120px]">
+                <thead>
+                  <tr class="bg-slate-50/95 border-b border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    <th class="sticky left-0 z-20 bg-slate-50 py-3 px-3 w-10 text-center">No</th>
+                    <th class="sticky left-10 z-20 bg-slate-50 py-3 px-3 min-w-[175px] sticky-col-shadow">Nama Anggota</th>
+                    ${MONTHS.map((m) => `<th class="py-3 px-2 text-center w-[68px]">${m.short}</th>`).join('')}
+                    <th class="py-3 px-3 text-right min-w-[105px]">Total</th>
+                    <th class="py-3 px-3 text-right min-w-[95px]">Lebih Bayar</th>
+                    <th class="py-3 px-3 min-w-[130px]">Catatan</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-200/70 text-xs">
+                  ${
+                    rows.length === 0
+                      ? `<tr><td colspan="17" class="py-12 text-center text-sm text-slate-400">Tidak ada data anggota yang cocok dengan filter.</td></tr>`
+                      : rows
+                          .map((r, idx) => {
+                            const isSelf = !admin && State.session?.id === r.member.id;
+                            return `
+                              <tr class="${isSelf ? 'bg-teal-50/40' : 'hover:bg-slate-50/70'} transition">
+                                <td class="sticky left-0 z-10 ${isSelf ? 'bg-teal-50/95' : 'bg-white'} py-2.5 px-3 text-center font-semibold text-slate-400 tabular-nums">
+                                  ${idx + 1}
+                                </td>
+                                <td class="sticky left-10 z-10 ${isSelf ? 'bg-teal-50/95' : 'bg-white'} py-2.5 px-3 sticky-col-shadow">
+                                  <div class="flex items-center justify-between gap-2">
+                                    <div class="min-w-0">
+                                      <div class="font-bold text-slate-900 truncate max-w-[125px]" title="${escapeHtml(r.member.nama)}">
+                                        ${escapeHtml(r.member.nama)}
+                                      </div>
+                                      <div class="text-[10px] text-slate-400">${escapeHtml(r.member.peran)}</div>
+                                    </div>
+                                    ${statusPill(r.derivedStatus)}
+                                  </div>
+                                </td>
+
+                                ${MONTHS.map((m) => {
+                                  const cell = iuranMap[`${r.member.id}_${m.num}`];
+                                  const nominal = cell ? Number(cell.nominal) : 0;
+                                  const isAnomaly = nominal > 0 && nominal > tarif * 2;
+                                  const clickable = admin
+                                    ? `onclick="openIuranCellModal('${r.member.id}', ${activeYr}, ${m.num})" class="cursor-pointer hover:ring-2 hover:ring-teal-500/40"`
+                                    : '';
+                                  if (nominal > 0) {
+                                    return `
+                                      <td class="py-2 px-1 text-center">
+                                        <div ${clickable} title="${
+                                          isAnomaly ? 'Perhatian: Nominal melebihi 2x tarif bulanan!' : formatRp(nominal)
+                                        }" class="mx-auto py-1.5 px-1 rounded-lg font-bold tabular-nums text-[11px] transition ${
+                                          isAnomaly
+                                            ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                            : 'bg-emerald-50 text-emerald-700 border border-emerald-200/70'
+                                        }">
+                                          ${Math.round(nominal / 1000)}k
+                                        </div>
+                                      </td>
+                                    `;
+                                  }
+                                  return `
+                                    <td class="py-2 px-1 text-center">
+                                      <div ${clickable} class="mx-auto py-1.5 px-1 rounded-lg text-[11px] text-slate-300 border border-dashed border-slate-200/80 ${
+                                        admin ? 'hover:bg-slate-100 hover:text-slate-500' : ''
+                                      }">
+                                        —
+                                      </div>
+                                    </td>
+                                  `;
+                                }).join('')}
+
+                                <td class="py-2.5 px-3 text-right font-bold tabular-nums text-slate-900">
+                                  ${formatRp(r.totalBayar)}
+                                </td>
+                                <td class="py-2.5 px-3 text-right">
+                                  <button
+                                    ${admin ? `onclick="openLebihBayarModal('${r.member.id}', ${activeYr})"` : 'disabled'}
+                                    class="tabular-nums font-semibold px-2 py-1 rounded-lg ${
+                                      r.lebihNominal > 0
+                                        ? 'bg-sky-50 text-sky-700 border border-sky-200/70'
+                                        : 'text-slate-400'
+                                    } ${admin ? 'hover:bg-sky-100 cursor-pointer' : 'cursor-default'}">
+                                    ${r.lebihNominal > 0 ? formatRp(r.lebihNominal) : 'Rp 0'}
+                                  </button>
+                                </td>
+                                <td class="py-2.5 px-3 text-[11px] text-slate-500 max-w-[160px] truncate" title="${escapeHtml(r.member.catatan_status || '')}">
+                                  ${escapeHtml(r.member.catatan_status || '—')}
+                                </td>
+                              </tr>
+                            `;
+                          })
+                          .join('')
+                  }
+                </tbody>
+                <tfoot>
+                  <tr class="bg-slate-100/90 border-t-2 border-slate-200 text-[11px] font-extrabold text-slate-900">
+                    <td class="sticky left-0 z-10 bg-slate-100 py-3 px-3"></td>
+                    <td class="sticky left-10 z-10 bg-slate-100 py-3 px-3 sticky-col-shadow">TOTAL (${rows.length} org)</td>
+                    ${MONTHS.map(
+                      (m) => `<td class="py-3 px-1 text-center tabular-nums text-teal-800">${monthTotals[m.num] > 0 ? Math.round(monthTotals[m.num] / 1000) + 'k' : '0'}</td>`
+                    ).join('')}
+                    <td class="py-3 px-3 text-right tabular-nums text-emerald-700">${formatRp(grandIuran)}</td>
+                    <td class="py-3 px-3 text-right tabular-nums text-sky-700">${formatRp(grandLebih)}</td>
+                    <td class="py-3 px-3 text-right tabular-nums text-slate-700">${formatRp(grandIuran + grandLebih)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function openIuranCellModal(anggotaId, tahun, bulan) {
+      if (!isAdmin()) return;
+      const member = State.data.anggota.find((a) => a.id === anggotaId);
+      const tarif = getTarifForYear(tahun);
+      const existing = State.data.iuran_kas.find(
+        (i) => i.anggota_id === anggotaId && Number(i.tahun) === Number(tahun) && Number(i.bulan) === Number(bulan)
+      );
+      const monthName = MONTHS[bulan - 1]?.full || bulan;
+      const todayStr = new Date().toISOString().slice(0, 10);
+
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-bold text-slate-900">Input Iuran • ${monthName} ${tahun}</h3>
+            <p class="text-xs text-slate-500 mt-0.5">${escapeHtml(member?.nama || '')} • Tarif standar ${formatRp(tarif)}</p>
+          </div>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <form onsubmit="saveIuranCell(event, '${anggotaId}', ${tahun}, ${bulan})" class="p-5 space-y-4">
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nominal Bayar (Rp)</label>
+            <input id="iu-nominal" type="number" min="0" step="1000" required value="${existing ? existing.nominal : tarif}"
+              oninput="checkIuranAnomaly(this.value, ${tarif})"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
+            <div id="iu-anomaly-warn" class="hidden mt-2 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 font-medium">
+              ⚠️ Nominal ini lebih dari 2× tarif bulanan (${formatRp(tarif)}). Pastikan tidak salah ketik angka nol (contoh: 150.000 vs 15.000).
+            </div>
+            <div class="flex items-center gap-2 mt-2">
+              <button type="button" onclick="document.getElementById('iu-nominal').value=${tarif}; checkIuranAnomaly(${tarif}, ${tarif});" class="px-2.5 py-1 rounded-lg bg-teal-50 text-teal-700 text-xs font-semibold hover:bg-teal-100">
+                Sesuai Tarif (${formatRp(tarif)})
+              </button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tanggal Bayar</label>
+              <input id="iu-tanggal" type="date" value="${existing?.tanggal_bayar || todayStr}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Keterangan (Opsional)</label>
+              <input id="iu-ket" type="text" value="${escapeHtml(existing?.keterangan || '')}" placeholder="Transfer / Tunai"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between pt-3 border-t border-slate-200 gap-2">
+            ${
+              existing
+                ? `<button type="button" onclick="removeIuranCell('${anggotaId}', ${tahun}, ${bulan})" class="px-3.5 py-2.5 rounded-xl text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 transition">Hapus Bayar</button>`
+                : `<div></div>`
+            }
+            <div class="flex items-center gap-2">
+              <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Batal</button>
+              <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan Iuran</button>
+            </div>
+          </div>
+        </form>
+      `, 'max-w-md');
+      checkIuranAnomaly(existing ? existing.nominal : tarif, tarif);
+    }
+
+    function checkIuranAnomaly(val, tarif) {
+      const el = document.getElementById('iu-anomaly-warn');
+      if (!el) return;
+      if (Number(val) > tarif * 2) el.classList.remove('hidden');
+      else el.classList.add('hidden');
+    }
+
+    async function saveIuranCell(e, anggota_id, tahun, bulan) {
+      e.preventDefault();
+      const nominal = Number(document.getElementById('iu-nominal').value) || 0;
+      const tanggal_bayar = document.getElementById('iu-tanggal').value || new Date().toISOString().slice(0, 10);
+      const keterangan = document.getElementById('iu-ket').value.trim();
+      try {
+        if (nominal <= 0) {
+          await DB.deleteIuran(anggota_id, tahun, bulan);
+          showToast('Pembayaran bulan tersebut dikosongkan.', 'info');
+        } else {
+          await DB.upsertIuran({ anggota_id, tahun, bulan, nominal, tanggal_bayar, keterangan });
+          showToast('Iuran berhasil disimpan.', 'success');
+        }
+        closeModal();
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menyimpan iuran: ' + err.message, 'error');
+      }
+    }
+
+    async function removeIuranCell(anggota_id, tahun, bulan) {
+      try {
+        await DB.deleteIuran(anggota_id, tahun, bulan);
+        closeModal();
+        showToast('Catatan pembayaran dihapus.', 'info');
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menghapus: ' + err.message, 'error');
+      }
+    }
+
+    function openLebihBayarModal(anggotaId, tahun) {
+      if (!isAdmin()) return;
+      const member = State.data.anggota.find((a) => a.id === anggotaId);
+      const existing = State.data.saldo_lebih_bayar.find(
+        (l) => l.anggota_id === anggotaId && Number(l.tahun) === Number(tahun)
+      );
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-bold text-slate-900">Saldo Lebih Bayar • ${tahun}</h3>
+            <p class="text-xs text-slate-500 mt-0.5">${escapeHtml(member?.nama || '')}</p>
+          </div>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <form onsubmit="saveLebihBayar(event, '${anggotaId}', ${tahun})" class="p-5 space-y-4">
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nominal Lebih Bayar (Rp)</label>
+            <input id="lb-nominal" type="number" min="0" step="1000" required value="${existing ? existing.nominal : 0}"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Keterangan</label>
+            <input id="lb-ket" type="text" value="${escapeHtml(existing?.keterangan || '')}" placeholder="Contoh: Sisa transfer / deposit"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
+          </div>
+          <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
+            <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Batal</button>
+            <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800">Simpan</button>
+          </div>
+        </form>
+      `, 'max-w-md');
+    }
+
+    async function saveLebihBayar(e, anggota_id, tahun) {
+      e.preventDefault();
+      const nominal = Number(document.getElementById('lb-nominal').value) || 0;
+      const keterangan = document.getElementById('lb-ket').value.trim();
+      try {
+        await DB.upsertLebihBayar({ anggota_id, tahun, nominal, keterangan });
+        closeModal();
+        showToast('Saldo lebih bayar diperbarui.', 'success');
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menyimpan: ' + err.message, 'error');
+      }
+    }
+
+    function exportIuranCsv() {
+      const yr = Number(State.selectedYear);
+      const iuranMap = {};
+      State.data.iuran_kas.filter((i) => Number(i.tahun) === yr).forEach((i) => { iuranMap[`${i.anggota_id}_${i.bulan}`] = i.nominal; });
+      const lebihMap = {};
+      State.data.saldo_lebih_bayar.filter((l) => Number(l.tahun) === yr).forEach((l) => { lebihMap[l.anggota_id] = l.nominal; });
+
+      const headers = ['No', 'Nama', 'Peran', 'Status', ...MONTHS.map((m) => m.short), 'Total Iuran', 'Lebih Bayar'];
+      const lines = [headers.join(',')];
+      State.data.anggota.forEach((m, idx) => {
+        let tot = 0;
+        const mCols = MONTHS.map((mo) => {
+          const v = Number(iuranMap[`${m.id}_${mo.num}`]) || 0;
+          tot += v;
+          return v;
+        });
+        const lb = Number(lebihMap[m.id]) || 0;
+        lines.push([idx + 1, `"${m.nama.replace(/"/g, '""')}"`, m.peran, m.status, ...mCols, tot, lb].join(','));
+      });
+
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Matriks_Iuran_IPD32_${yr}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`File CSV Matriks ${yr} berhasil diunduh.`, 'success');
+    }
+
+    /* ============================================================================
+       5. PAGE: PEMASUKAN LAIN & PENGELUARAN (BUKU KAS)
+    ============================================================================ */
+    function renderTransaksiPage() {
+      const years = getAvailableYears();
+      const admin = isAdmin();
+      const q = State.txSearch.trim().toLowerCase();
+
+      const filtered = State.data.transaksi_kas
+        .filter((t) => {
+          if (State.txYearFilter !== 'Semua' && String(t.tahun) !== String(State.txYearFilter)) return false;
+          if (State.txMonthFilter !== 'Semua' && String(t.bulan) !== String(State.txMonthFilter)) return false;
+          if (State.txTypeFilter !== 'Semua' && t.tipe !== State.txTypeFilter) return false;
+          if (q && !(t.deskripsi.toLowerCase().includes(q) || t.kategori.toLowerCase().includes(q))) return false;
+          return true;
+        })
+        .sort((a, b) => (b.tanggal || '').localeCompare(a.tanggal || ''));
+
+      const sumIn = filtered.filter((t) => t.tipe === 'masuk_lain').reduce((a, b) => a + Number(b.nominal), 0);
+      const sumOut = filtered.filter((t) => t.tipe === 'keluar').reduce((a, b) => a + Number(b.nominal), 0);
+
+      return `
+        <div class="space-y-5 animate-fade-up">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Buku Kas (Masuk Lain & Keluar)</h1>
+              <p class="text-sm text-slate-500 mt-0.5">Pencatatan Cordlife, IND, Sisa Patungan, Adm Bank, Besuk, Duka, Takjil & Operasional</p>
+            </div>
+            ${
+              admin
+                ? `
+                <button onclick="openTransaksiModal()" class="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm transition active:scale-[0.98]">
+                  <i data-lucide="plus" class="w-4 h-4"></i>
+                  <span>Catat Transaksi</span>
+                </button>
+              `
+                : ''
+            }
+          </div>
+
+          <!-- Ringkasan Filter -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="glass-card rounded-2xl p-4 flex items-center justify-between">
+              <div>
+                <div class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Pemasukan Lain</div>
+                <div class="text-lg font-extrabold tabular-nums text-emerald-700 mt-1">${formatRp(sumIn)}</div>
+              </div>
+              <div class="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center"><i data-lucide="arrow-down-left" class="w-4 h-4"></i></div>
+            </div>
+            <div class="glass-card rounded-2xl p-4 flex items-center justify-between">
+              <div>
+                <div class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Total Pengeluaran</div>
+                <div class="text-lg font-extrabold tabular-nums text-rose-700 mt-1">${formatRp(sumOut)}</div>
+              </div>
+              <div class="w-9 h-9 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center"><i data-lucide="arrow-up-right" class="w-4 h-4"></i></div>
+            </div>
+            <div class="glass-card rounded-2xl p-4 flex items-center justify-between">
+              <div>
+                <div class="text-[11px] font-bold uppercase tracking-wider text-slate-500">Selisih Non-Iuran</div>
+                <div class="text-lg font-extrabold tabular-nums ${sumIn - sumOut >= 0 ? 'text-teal-700' : 'text-rose-700'} mt-1">${formatRp(sumIn - sumOut, true)}</div>
+              </div>
+              <div class="w-9 h-9 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center"><i data-lucide="scale" class="w-4 h-4"></i></div>
+            </div>
+          </div>
+
+          <!-- Filter Bar -->
+          <div class="glass-card rounded-2xl p-3.5 flex flex-col md:flex-row gap-2.5 items-stretch md:items-center justify-between">
+            <div class="flex flex-wrap items-center gap-2">
+              <select onchange="State.txYearFilter=this.value; renderApp();" class="px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-800">
+                <option value="Semua" ${State.txYearFilter === 'Semua' ? 'selected' : ''}>Semua Tahun</option>
+                ${years.map((y) => `<option value="${y}" ${String(State.txYearFilter) === String(y) ? 'selected' : ''}>Tahun ${y}</option>`).join('')}
+              </select>
+              <select onchange="State.txMonthFilter=this.value; renderApp();" class="px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-700">
+                <option value="Semua" ${State.txMonthFilter === 'Semua' ? 'selected' : ''}>Semua Bulan</option>
+                ${MONTHS.map((m) => `<option value="${m.num}" ${String(State.txMonthFilter) === String(m.num) ? 'selected' : ''}>${m.full}</option>`).join('')}
+              </select>
+              <select onchange="State.txTypeFilter=this.value; renderApp();" class="px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-700">
+                <option value="Semua" ${State.txTypeFilter === 'Semua' ? 'selected' : ''}>Semua Tipe</option>
+                <option value="masuk_lain" ${State.txTypeFilter === 'masuk_lain' ? 'selected' : ''}>Pemasukan Lain</option>
+                <option value="keluar" ${State.txTypeFilter === 'keluar' ? 'selected' : ''}>Pengeluaran</option>
+              </select>
+            </div>
+            <div class="relative md:w-64">
+              <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+              <input
+                type="text"
+                value="${escapeHtml(State.txSearch)}"
+                oninput="State.txSearch=this.value; renderApp();"
+                placeholder="Cari kategori / deskripsi..."
+                class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-600/25"
+              />
+            </div>
+          </div>
+
+          <!-- Table -->
+          <div class="glass-card rounded-2xl overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse min-w-[680px]">
+                <thead>
+                  <tr class="bg-slate-50/90 border-b border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    <th class="py-3.5 px-4">Tanggal</th>
+                    <th class="py-3.5 px-4">Tipe & Kategori</th>
+                    <th class="py-3.5 px-4">Deskripsi</th>
+                    <th class="py-3.5 px-4 text-right">Nominal</th>
+                    ${admin ? `<th class="py-3.5 px-4 text-right w-24">Aksi</th>` : ''}
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-200/70 text-sm">
+                  ${
+                    filtered.length === 0
+                      ? `<tr><td colspan="${admin ? 5 : 4}" class="py-12 text-center text-slate-400">Tidak ada transaksi pada filter ini.</td></tr>`
+                      : filtered
+                          .map((tx) => {
+                            const isIn = tx.tipe === 'masuk_lain';
+                            return `
+                              <tr class="hover:bg-slate-50/70 transition">
+                                <td class="py-3.5 px-4 whitespace-nowrap text-xs font-semibold text-slate-600 tabular-nums">
+                                  ${formatDateId(tx.tanggal)}
+                                </td>
+                                <td class="py-3.5 px-4 whitespace-nowrap">
+                                  <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                                    isIn ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                                  }">
+                                    ${escapeHtml(tx.kategori)}
+                                  </span>
+                                </td>
+                                <td class="py-3.5 px-4 text-slate-800 font-medium">
+                                  <div>${escapeHtml(tx.deskripsi)}</div>
+                                  ${
+                                    tx.patungan_id
+                                      ? `<span class="inline-flex items-center gap-1 text-[10px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-full mt-1"><i data-lucide="link-2" class="w-3 h-3"></i>Terhubung Patungan</span>`
+                                      : ''
+                                  }
+                                </td>
+                                <td class="py-3.5 px-4 text-right whitespace-nowrap font-extrabold tabular-nums ${
+                                  isIn ? 'text-emerald-700' : 'text-rose-700'
+                                }">
+                                  ${isIn ? '+' : '-'}${formatRp(tx.nominal)}
+                                </td>
+                                ${
+                                  admin
+                                    ? `
+                                    <td class="py-3.5 px-4 text-right whitespace-nowrap">
+                                      <button onclick="openTransaksiModal('${tx.id}')" title="Edit" class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-teal-700"><i data-lucide="pencil" class="w-4 h-4"></i></button>
+                                      <button onclick="deleteTransaksi('${tx.id}')" title="Hapus" class="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                    </td>
+                                  `
+                                    : ''
+                                }
+                              </tr>
+                            `;
+                          })
+                          .join('')
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function openTransaksiModal(editId = null) {
+      if (!isAdmin()) return;
+      const tx = editId ? State.data.transaksi_kas.find((t) => t.id === editId) : null;
+      const defaultDate = tx?.tanggal || new Date().toISOString().slice(0, 10);
+      const defaultTipe = tx?.tipe || 'keluar';
+
+      const buildKategoriOptions = (tipe, selectedCat) => {
+        const list = tipe === 'masuk_lain' ? KATEGORI_MASUK : KATEGORI_KELUAR;
+        const merged = selectedCat && !list.includes(selectedCat) ? [selectedCat, ...list] : list;
+        return merged.map((c) => `<option value="${escapeHtml(c)}" ${c === selectedCat ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('');
+      };
+
+      window.__onTxTypeChange = (val) => {
+        const sel = document.getElementById('tx-kategori');
+        if (sel) sel.innerHTML = buildKategoriOptions(val, '');
+      };
+
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <h3 class="text-base font-bold text-slate-900">${tx ? 'Edit Transaksi Kas' : 'Catat Transaksi Baru'}</h3>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <form onsubmit="saveTransaksi(event, '${editId || ''}')" class="p-5 space-y-4">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tipe Transaksi</label>
+              <select id="tx-tipe" onchange="window.__onTxTypeChange(this.value)" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold">
+                <option value="keluar" ${defaultTipe === 'keluar' ? 'selected' : ''}>Pengeluaran (-)</option>
+                <option value="masuk_lain" ${defaultTipe === 'masuk_lain' ? 'selected' : ''}>Pemasukan Lain (+)</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tanggal</label>
+              <input id="tx-tanggal" type="date" required value="${defaultDate}" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Kategori</label>
+            <select id="tx-kategori" required class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm">
+              ${buildKategoriOptions(defaultTipe, tx?.kategori || '')}
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nominal (Rp)</label>
+            <input id="tx-nominal" type="number" min="1" required value="${tx?.nominal || ''}" placeholder="Contoh: 250000"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Deskripsi / Keterangan</label>
+            <textarea id="tx-deskripsi" rows="2" required placeholder="Contoh: Besuk keluarga perawat / Fee Cordlife"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm">${escapeHtml(tx?.deskripsi || '')}</textarea>
+          </div>
+
+          <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
+            <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Batal</button>
+            <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan Transaksi</button>
+          </div>
+        </form>
+      `, 'max-w-md');
+    }
+
+    async function saveTransaksi(e, editId) {
+      e.preventDefault();
+      const tipe = document.getElementById('tx-tipe').value;
+      const tanggal = document.getElementById('tx-tanggal').value;
+      const kategori = document.getElementById('tx-kategori').value;
+      const nominal = Number(document.getElementById('tx-nominal').value) || 0;
+      const deskripsi = document.getElementById('tx-deskripsi').value.trim();
+      const dt = new Date(tanggal + 'T00:00:00');
+      const tahun = dt.getFullYear();
+      const bulan = dt.getMonth() + 1;
+
+      const payload = { tahun, bulan, tanggal, tipe, kategori, deskripsi, nominal };
+      try {
+        if (editId) {
+          await DB.updateRow('transaksi_kas', editId, payload);
+          showToast('Transaksi berhasil diperbarui.', 'success');
+        } else {
+          await DB.insertRow('transaksi_kas', { ...payload, patungan_id: null });
+          showToast('Transaksi baru tercatat.', 'success');
+        }
+        closeModal();
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menyimpan transaksi: ' + err.message, 'error');
+      }
+    }
+
+    function deleteTransaksi(id) {
+      if (!isAdmin()) return;
+      openConfirmModal({
+        title: 'Hapus Transaksi Ini?',
+        message: 'Data transaksi akan dihapus permanen dan saldo kas kumulatif akan dihitung ulang otomatis.',
+        confirmLabel: 'Hapus Permanen',
+        danger: true,
+        onConfirm: async () => {
+          try {
+            await DB.deleteRow('transaksi_kas', id);
+            showToast('Transaksi dihapus.', 'info');
+            await refreshData(true);
+          } catch (err) {
+            showToast('Gagal menghapus: ' + err.message, 'error');
+          }
+        },
+      });
+    }
+
+    /* ============================================================================
+       6. PAGE: PATUNGAN & ACARA (LIST + DETAIL PESERTA + POSTING KE KAS)
+    ============================================================================ */
+    function renderPatunganPage() {
+      if (State.activePatunganId) {
+        return renderPatunganDetail(State.activePatunganId);
+      }
+
+      const admin = isAdmin();
+      const years = [...new Set(State.data.patungan_event.map((p) => Number(p.tahun)))].sort((a, b) => b - a);
+      const filtered = State.data.patungan_event.filter((ev) => {
+        if (State.patYearFilter !== 'Semua' && String(ev.tahun) !== String(State.patYearFilter)) return false;
+        if (State.patStatusFilter !== 'Semua' && ev.status !== State.patStatusFilter) return false;
+        return true;
+      });
+
+      let totTerkumpul = 0, totKeluar = 0;
+      filtered.forEach((ev) => {
+        const s = computePatunganStats(ev.id);
+        totTerkumpul += s.terkumpul;
+        totKeluar += s.pengeluaran;
+      });
+
+      return `
+        <div class="space-y-5 animate-fade-up">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Patungan & Acara Ruangan</h1>
+              <p class="text-sm text-slate-500 mt-0.5">Pengelolaan patungan perpisahan, kado, acara (mendukung multi-tarif & peserta eksternal)</p>
+            </div>
+            ${
+              admin
+                ? `
+                <button onclick="openPatunganModal()" class="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm transition active:scale-[0.98]">
+                  <i data-lucide="plus" class="w-4 h-4"></i>
+                  <span>Buat Event Patungan</span>
+                </button>
+              `
+                : ''
+            }
+          </div>
+
+          <!-- Filter & Rekap Patungan -->
+          <div class="glass-card rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <select onchange="State.patYearFilter=this.value; renderApp();" class="px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-800">
+                <option value="Semua" ${State.patYearFilter === 'Semua' ? 'selected' : ''}>Semua Tahun</option>
+                ${years.map((y) => `<option value="${y}" ${String(State.patYearFilter) === String(y) ? 'selected' : ''}>Tahun ${y}</option>`).join('')}
+              </select>
+              ${['Semua', 'Berjalan', 'Selesai']
+                .map(
+                  (st) => `
+                <button onclick="State.patStatusFilter='${st}'; renderApp();" class="px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+                  State.patStatusFilter === st ? 'bg-teal-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }">${st}</button>
+              `
+                )
+                .join('')}
+            </div>
+            <div class="flex flex-wrap items-center gap-4 text-xs">
+              <div><span class="text-slate-500">Terkumpul:</span> <b class="tabular-nums text-emerald-700">${formatRp(totTerkumpul)}</b></div>
+              <div><span class="text-slate-500">Belanja:</span> <b class="tabular-nums text-rose-700">${formatRp(totKeluar)}</b></div>
+              <div><span class="text-slate-500">Selisih:</span> <b class="tabular-nums ${totTerkumpul - totKeluar >= 0 ? 'text-teal-700' : 'text-rose-700'}">${formatRp(totTerkumpul - totKeluar, true)}</b></div>
+            </div>
+          </div>
+
+          <!-- Grid Event Cards -->
+          ${
+            filtered.length === 0
+              ? `<div class="glass-card rounded-2xl p-12 text-center text-sm text-slate-400">Belum ada event patungan.</div>`
+              : `
+              <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                ${filtered
+                  .map((ev) => {
+                    const st = computePatunganStats(ev.id);
+                    const pct = st.pengeluaran > 0 ? Math.min(100, Math.round((st.terkumpul / st.pengeluaran) * 100)) : 100;
+                    const isSurplus = st.selisih >= 0;
+                    return `
+                      <div onclick="State.activePatunganId='${ev.id}'; renderApp();"
+                        class="glass-card rounded-2xl p-5 cursor-pointer hover:border-teal-300 hover:shadow-float transition-all flex flex-col justify-between group">
+                        <div>
+                          <div class="flex items-start justify-between gap-2 mb-2">
+                            <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                              ev.status === 'Selesai'
+                                ? 'bg-emerald-50 text-emerald-700'
+                                : 'bg-amber-50 text-amber-700'
+                            }">
+                              ${ev.status} • ${ev.tahun}
+                            </span>
+                            ${
+                              ev.terposting_ke_kas
+                                ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-700"><i data-lucide="check-check" class="w-3 h-3"></i>Terposting</span>`
+                                : `<span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-500">Belum Posting</span>`
+                            }
+                          </div>
+                          <h3 class="text-base font-bold text-slate-900 group-hover:text-teal-700 transition">${escapeHtml(ev.nama_event)}</h3>
+                          <p class="text-xs text-slate-500 mt-1 line-clamp-2">${escapeHtml(ev.catatan_tarif || `Tarif default ${formatRp(ev.tarif_default)}`)}</p>
+                        </div>
+
+                        <div class="mt-4 pt-4 border-t border-slate-200/70 space-y-2.5">
+                          <div class="flex items-center justify-between text-xs">
+                            <span class="text-slate-500 font-medium">${st.lunasCount}/${st.totalPeserta} peserta lunas</span>
+                            <span class="font-bold tabular-nums text-slate-800">${pct}%</span>
+                          </div>
+                          <div class="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+                            <div class="h-full rounded-full ${isSurplus ? 'bg-emerald-500' : 'bg-amber-500'}" style="width:${pct}%"></div>
+                          </div>
+                          <div class="grid grid-cols-3 gap-2 pt-1 text-[11px]">
+                            <div>
+                              <div class="text-slate-400">Terkumpul</div>
+                              <div class="font-bold tabular-nums text-emerald-700">${formatRp(st.terkumpul)}</div>
+                            </div>
+                            <div>
+                              <div class="text-slate-400">Pengeluaran</div>
+                              <div class="font-bold tabular-nums text-slate-800">${formatRp(st.pengeluaran)}</div>
+                            </div>
+                            <div class="text-right">
+                              <div class="text-slate-400">Selisih</div>
+                              <div class="font-extrabold tabular-nums ${isSurplus ? 'text-teal-700' : 'text-rose-700'}">${formatRp(st.selisih, true)}</div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join('')}
+              </div>
+            `
+          }
+        </div>
+      `;
+    }
+
+    function renderPatunganDetail(eventId) {
+      const ev = State.data.patungan_event.find((e) => e.id === eventId);
+      if (!ev) {
+        State.activePatunganId = null;
+        return renderPatunganPage();
+      }
+      const admin = isAdmin();
+      const st = computePatunganStats(eventId);
+      const peserta = State.data.patungan_peserta.filter((p) => p.patungan_id === eventId);
+      const isSurplus = st.selisih >= 0;
+
+      return `
+        <div class="space-y-5 animate-fade-up">
+          <!-- Back & Actions -->
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div class="flex items-center gap-3">
+              <button onclick="State.activePatunganId=null; renderApp();" class="p-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 transition">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <h1 class="text-xl sm:text-2xl font-extrabold text-slate-900">${escapeHtml(ev.nama_event)}</h1>
+                  <span class="px-2.5 py-0.5 rounded-full text-xs font-bold ${ev.status === 'Selesai' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}">${ev.status}</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-0.5">${escapeHtml(ev.catatan_tarif || '')} ${ev.keterangan ? '• ' + escapeHtml(ev.keterangan) : ''}</p>
+              </div>
+            </div>
+            ${
+              admin
+                ? `
+                <div class="flex flex-wrap items-center gap-2">
+                  <button onclick="openPatunganModal('${ev.id}')" class="px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                    Edit Event
+                  </button>
+                  ${
+                    !ev.terposting_ke_kas
+                      ? `
+                      <button onclick="postingPatunganKeKas('${ev.id}')" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shadow-sm transition">
+                        <i data-lucide="send" class="w-3.5 h-3.5"></i>
+                        <span>Posting Selisih ke Kas</span>
+                      </button>
+                    `
+                      : `
+                      <span class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-sky-50 text-sky-700 text-xs font-bold border border-sky-200">
+                        <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i>Sudah Diposting ke Kas
+                      </span>
+                    `
+                  }
+                  <button onclick="deletePatunganEvent('${ev.id}')" class="p-2 rounded-xl bg-rose-50 text-rose-700 hover:bg-rose-100" title="Hapus Event">
+                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                  </button>
+                </div>
+              `
+                : ''
+            }
+          </div>
+
+          <!-- 4 Ringkasan Event -->
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div class="glass-card rounded-2xl p-4">
+              <div class="text-[11px] font-bold uppercase text-slate-500">Terkumpul</div>
+              <div class="text-xl font-extrabold tabular-nums text-emerald-700 mt-1">${formatRp(st.terkumpul)}</div>
+              <div class="text-xs text-slate-500 mt-0.5">${st.lunasCount} dari ${st.totalPeserta} peserta lunas</div>
+            </div>
+            <div class="glass-card rounded-2xl p-4">
+              <div class="text-[11px] font-bold uppercase text-slate-500">Total Pengeluaran</div>
+              <div class="text-xl font-extrabold tabular-nums text-slate-900 mt-1">${formatRp(st.pengeluaran)}</div>
+              <div class="text-xs text-slate-500 mt-0.5">Harga kado / konsumsi acara</div>
+            </div>
+            <div class="glass-card rounded-2xl p-4">
+              <div class="text-[11px] font-bold uppercase text-slate-500">Selisih (±)</div>
+              <div class="text-xl font-extrabold tabular-nums ${isSurplus ? 'text-teal-700' : 'text-rose-700'} mt-1">${formatRp(st.selisih, true)}</div>
+              <div class="text-xs text-slate-500 mt-0.5">${isSurplus ? 'Surplus → Sisa Patungan' : 'Defisit → Subsidi Kas'}</div>
+            </div>
+            <div class="glass-card rounded-2xl p-4">
+              <div class="text-[11px] font-bold uppercase text-slate-500">Tarif Default</div>
+              <div class="text-xl font-extrabold tabular-nums text-sky-700 mt-1">${formatRp(ev.tarif_default)}</div>
+              <div class="text-xs text-slate-500 mt-0.5">Bisa beda per peserta/peran</div>
+            </div>
+          </div>
+
+          <!-- Daftar Peserta -->
+          <div class="glass-card rounded-2xl overflow-hidden">
+            <div class="p-4 sm:p-5 border-b border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h2 class="text-base font-bold text-slate-900">Daftar Peserta Patungan (${peserta.length})</h2>
+                <p class="text-xs text-slate-500 mt-0.5">Mendukung anggota internal IPD 32 maupun peserta eksternal (dokter / ruangan lain)</p>
+              </div>
+              ${
+                admin
+                  ? `
+                  <div class="flex flex-wrap items-center gap-2">
+                    <button onclick="importActiveMembersToPatungan('${ev.id}')" class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition">
+                      <i data-lucide="users" class="w-3.5 h-3.5"></i>
+                      <span>+ Semua Anggota Aktif</span>
+                    </button>
+                    <button onclick="openPesertaModal('${ev.id}')" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm transition">
+                      <i data-lucide="user-plus" class="w-3.5 h-3.5"></i>
+                      <span>Tambah Peserta</span>
+                    </button>
+                  </div>
+                `
+                  : ''
+              }
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse min-w-[620px]">
+                <thead>
+                  <tr class="bg-slate-50/90 border-b border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    <th class="py-3 px-4 w-12">No</th>
+                    <th class="py-3 px-4">Nama Peserta</th>
+                    <th class="py-3 px-4 text-right">Tarif Target</th>
+                    <th class="py-3 px-4 text-right">Nominal Bayar</th>
+                    <th class="py-3 px-4 text-center">Status</th>
+                    ${admin ? `<th class="py-3 px-4 text-right w-28">Aksi</th>` : ''}
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-200/70 text-sm">
+                  ${
+                    peserta.length === 0
+                      ? `<tr><td colspan="${admin ? 6 : 5}" class="py-10 text-center text-slate-400">Belum ada peserta terdaftar pada event ini.</td></tr>`
+                      : peserta
+                          .map((p, idx) => {
+                            const lunas = p.status_bayar === 'Lunas';
+                            return `
+                              <tr class="hover:bg-slate-50/70 transition">
+                                <td class="py-3 px-4 text-xs font-semibold text-slate-400 tabular-nums">${idx + 1}</td>
+                                <td class="py-3 px-4">
+                                  <div class="font-bold text-slate-900 flex items-center gap-2">
+                                    <span>${escapeHtml(p.nama_peserta)}</span>
+                                    ${!p.anggota_id ? `<span class="px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 text-[10px] font-bold">Eksternal</span>` : ''}
+                                  </div>
+                                  ${p.keterangan ? `<div class="text-xs text-slate-500">${escapeHtml(p.keterangan)}</div>` : ''}
+                                </td>
+                                <td class="py-3 px-4 text-right tabular-nums text-slate-600">${formatRp(p.tarif_target)}</td>
+                                <td class="py-3 px-4 text-right tabular-nums font-bold ${lunas ? 'text-emerald-700' : 'text-slate-400'}">${formatRp(p.nominal_bayar)}</td>
+                                <td class="py-3 px-4 text-center">
+                                  ${
+                                    admin
+                                      ? `
+                                      <button onclick="togglePesertaLunas('${p.id}')" class="px-3 py-1 rounded-full text-xs font-bold transition active:scale-95 ${
+                                        lunas
+                                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'
+                                          : 'bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100'
+                                      }">
+                                        ${lunas ? '✓ Lunas' : 'Belum Bayar'}
+                                      </button>
+                                    `
+                                      : `<span class="px-3 py-1 rounded-full text-xs font-bold ${lunas ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}">${p.status_bayar}</span>`
+                                  }
+                                </td>
+                                ${
+                                  admin
+                                    ? `
+                                    <td class="py-3 px-4 text-right whitespace-nowrap">
+                                      <button onclick="openPesertaModal('${ev.id}', '${p.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-teal-700"><i data-lucide="pencil" class="w-4 h-4"></i></button>
+                                      <button onclick="deletePeserta('${p.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                    </td>
+                                  `
+                                    : ''
+                                }
+                              </tr>
+                            `;
+                          })
+                          .join('')
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function openPatunganModal(editId = null) {
+      if (!isAdmin()) return;
+      const ev = editId ? State.data.patungan_event.find((e) => e.id === editId) : null;
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <h3 class="text-base font-bold text-slate-900">${ev ? 'Edit Event Patungan' : 'Buat Event Patungan Baru'}</h3>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <form onsubmit="savePatunganEvent(event, '${editId || ''}')" class="p-5 space-y-4">
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nama Event / Acara</label>
+            <input id="pe-nama" type="text" required value="${escapeHtml(ev?.nama_event || '')}" placeholder="Contoh: Perpisahan Ns. Budi"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tahun</label>
+              <input id="pe-tahun" type="number" required value="${ev?.tahun || State.selectedYear}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Status</label>
+              <select id="pe-status" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold">
+                <option value="Berjalan" ${ev?.status === 'Berjalan' ? 'selected' : ''}>Berjalan</option>
+                <option value="Selesai" ${ev?.status === 'Selesai' ? 'selected' : ''}>Selesai</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tarif Default (Rp)</label>
+              <input id="pe-tarif" type="number" min="0" required value="${ev?.tarif_default ?? 35000}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Total Pengeluaran (Rp)</label>
+              <input id="pe-keluar" type="number" min="0" required value="${ev?.total_pengeluaran ?? 0}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Catatan Tarif (Jika Multi-Tarif)</label>
+            <input id="pe-catatan" type="text" value="${escapeHtml(ev?.catatan_tarif || '')}" placeholder="Contoh: Perawat Rp 50.000 • Dokter Rp 91.000"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Keterangan Acara</label>
+            <textarea id="pe-ket" rows="2" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm">${escapeHtml(ev?.keterangan || '')}</textarea>
+          </div>
+          <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
+            <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Batal</button>
+            <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan Event</button>
+          </div>
+        </form>
+      `, 'max-w-md');
+    }
+
+    async function savePatunganEvent(e, editId) {
+      e.preventDefault();
+      const payload = {
+        nama_event: document.getElementById('pe-nama').value.trim(),
+        tahun: Number(document.getElementById('pe-tahun').value),
+        status: document.getElementById('pe-status').value,
+        tarif_default: Number(document.getElementById('pe-tarif').value) || 0,
+        total_pengeluaran: Number(document.getElementById('pe-keluar').value) || 0,
+        catatan_tarif: document.getElementById('pe-catatan').value.trim(),
+        keterangan: document.getElementById('pe-ket').value.trim(),
+      };
+      try {
+        if (editId) {
+          await DB.updateRow('patungan_event', editId, payload);
+          showToast('Event patungan diperbarui.', 'success');
+        } else {
+          const created = await DB.insertRow('patungan_event', { ...payload, terposting_ke_kas: false });
+          State.activePatunganId = created.id;
+          showToast('Event patungan berhasil dibuat.', 'success');
+        }
+        closeModal();
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menyimpan event: ' + err.message, 'error');
+      }
+    }
+
+    function deletePatunganEvent(id) {
+      if (!isAdmin()) return;
+      openConfirmModal({
+        title: 'Hapus Event Patungan?',
+        message: 'Seluruh daftar peserta pada event ini akan ikut terhapus.',
+        confirmLabel: 'Hapus Event',
+        danger: true,
+        onConfirm: async () => {
+          try {
+            await DB.deleteRow('patungan_event', id);
+            State.activePatunganId = null;
+            showToast('Event patungan dihapus.', 'info');
+            await refreshData(true);
+          } catch (err) {
+            showToast('Gagal menghapus: ' + err.message, 'error');
+          }
+        },
+      });
+    }
+
+    async function importActiveMembersToPatungan(eventId) {
+      if (!isAdmin()) return;
+      const ev = State.data.patungan_event.find((e) => e.id === eventId);
+      if (!ev) return;
+      const existingIds = new Set(
+        State.data.patungan_peserta.filter((p) => p.patungan_id === eventId && p.anggota_id).map((p) => p.anggota_id)
+      );
+      const toAdd = State.data.anggota
+        .filter((a) => a.status === 'Aktif' && !existingIds.has(a.id))
+        .map((a) => ({
+          patungan_id: eventId,
+          anggota_id: a.id,
+          nama_peserta: a.nama,
+          tarif_target: Number(ev.tarif_default) || 0,
+          nominal_bayar: 0,
+          status_bayar: 'Belum Bayar',
+          keterangan: a.peran,
+        }));
+      if (toAdd.length === 0) {
+        showToast('Semua anggota aktif sudah masuk dalam daftar peserta.', 'info');
+        return;
+      }
+      try {
+        await DB.insertRows('patungan_peserta', toAdd);
+        showToast(`${toAdd.length} anggota aktif ditambahkan ke patungan.`, 'success');
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menambahkan anggota: ' + err.message, 'error');
+      }
+    }
+
+    function openPesertaModal(eventId, pesertaId = null) {
+      if (!isAdmin()) return;
+      const ev = State.data.patungan_event.find((e) => e.id === eventId);
+      const p = pesertaId ? State.data.patungan_peserta.find((x) => x.id === pesertaId) : null;
+
+      window.__onSelectInternalMember = (memberId) => {
+        const m = State.data.anggota.find((x) => x.id === memberId);
+        if (m) {
+          document.getElementById('pp-nama').value = m.nama;
+          document.getElementById('pp-ket').value = m.peran;
+        }
+      };
+
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <h3 class="text-base font-bold text-slate-900">${p ? 'Edit Peserta Patungan' : 'Tambah Peserta Patungan'}</h3>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <form onsubmit="savePesertaPatungan(event, '${eventId}', '${pesertaId || ''}')" class="p-5 space-y-4">
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Pilih dari Anggota IPD 32 (Opsional)</label>
+            <select id="pp-anggota" onchange="window.__onSelectInternalMember(this.value)" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm">
+              <option value="">— Peserta Eksternal / Dokter (Ketik Manual) —</option>
+              ${State.data.anggota.map((a) => `<option value="${a.id}" ${p?.anggota_id === a.id ? 'selected' : ''}>${escapeHtml(a.nama)} (${a.peran})</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nama Peserta</label>
+            <input id="pp-nama" type="text" required value="${escapeHtml(p?.nama_peserta || '')}" placeholder="Contoh: dr. Hendra Sp.PD"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tarif Target (Rp)</label>
+              <input id="pp-target" type="number" min="0" required value="${p?.tarif_target ?? ev?.tarif_default ?? 0}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nominal Bayar (Rp)</label>
+              <input id="pp-bayar" type="number" min="0" required value="${p?.nominal_bayar ?? 0}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Keterangan / Peran</label>
+            <input id="pp-ket" type="text" value="${escapeHtml(p?.keterangan || '')}" placeholder="Contoh: Dokter / Perawat"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+          </div>
+          <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
+            <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Batal</button>
+            <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan Peserta</button>
+          </div>
+        </form>
+      `, 'max-w-md');
+    }
+
+    async function savePesertaPatungan(e, eventId, pesertaId) {
+      e.preventDefault();
+      const anggota_id = document.getElementById('pp-anggota').value || null;
+      const nama_peserta = document.getElementById('pp-nama').value.trim();
+      const tarif_target = Number(document.getElementById('pp-target').value) || 0;
+      const nominal_bayar = Number(document.getElementById('pp-bayar').value) || 0;
+      const status_bayar = nominal_bayar >= tarif_target && nominal_bayar > 0 ? 'Lunas' : 'Belum Bayar';
+      const keterangan = document.getElementById('pp-ket').value.trim();
+
+      const payload = { patungan_id: eventId, anggota_id, nama_peserta, tarif_target, nominal_bayar, status_bayar, keterangan };
+      try {
+        if (pesertaId) {
+          await DB.updateRow('patungan_peserta', pesertaId, payload);
+          showToast('Data peserta diperbarui.', 'success');
+        } else {
+          await DB.insertRow('patungan_peserta', payload);
+          showToast('Peserta ditambahkan.', 'success');
+        }
+        closeModal();
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menyimpan peserta: ' + err.message, 'error');
+      }
+    }
+
+    async function togglePesertaLunas(pesertaId) {
+      if (!isAdmin()) return;
+      const p = State.data.patungan_peserta.find((x) => x.id === pesertaId);
+      if (!p) return;
+      const willBeLunas = p.status_bayar !== 'Lunas';
+      try {
+        await DB.updateRow('patungan_peserta', pesertaId, {
+          status_bayar: willBeLunas ? 'Lunas' : 'Belum Bayar',
+          nominal_bayar: willBeLunas ? Number(p.tarif_target) : 0,
+        });
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal mengubah status: ' + err.message, 'error');
+      }
+    }
+
+    function deletePeserta(pesertaId) {
+      if (!isAdmin()) return;
+      openConfirmModal({
+        title: 'Hapus Peserta?',
+        message: 'Peserta ini akan dihapus dari daftar patungan.',
+        confirmLabel: 'Hapus',
+        danger: true,
+        onConfirm: async () => {
+          try {
+            await DB.deleteRow('patungan_peserta', pesertaId);
+            showToast('Peserta dihapus.', 'info');
+            await refreshData(true);
+          } catch (err) {
+            showToast('Gagal menghapus: ' + err.message, 'error');
+          }
+        },
+      });
+    }
+
+    function postingPatunganKeKas(eventId) {
+      if (!isAdmin()) return;
+      const ev = State.data.patungan_event.find((e) => e.id === eventId);
+      if (!ev) return;
+      const st = computePatunganStats(eventId);
+      const isSurplus = st.selisih >= 0;
+      const absSelisih = Math.abs(st.selisih);
+
+      if (absSelisih === 0) {
+        openConfirmModal({
+          title: 'Tandai Event Selesai & Terposting?',
+          message: 'Selisih patungan Rp 0 (pas). Event akan ditandai sudah terposting tanpa menambah transaksi kas baru.',
+          confirmLabel: 'Ya, Tandai Selesai',
+          onConfirm: async () => {
+            await DB.updateRow('patungan_event', eventId, { status: 'Selesai', terposting_ke_kas: true });
+            showToast('Event ditandai selesai & terposting.', 'success');
+            await refreshData(true);
+          },
+        });
+        return;
+      }
+
+      openConfirmModal({
+        title: isSurplus ? 'Posting Sisa Patungan ke Kas Masuk?' : 'Posting Defisit Patungan ke Pengeluaran Kas?',
+        message: isSurplus
+          ? `Surplus sebesar ${formatRp(absSelisih)} dari "${ev.nama_event}" akan dicatat otomatis sebagai Pemasukan Lain (Sisa Patungan).`
+          : `Kekurangan dana sebesar ${formatRp(absSelisih)} dari "${ev.nama_event}" akan dicatat otomatis sebagai Pengeluaran Kas (Defisit Patungan).`,
+        confirmLabel: 'Posting ke Buku Kas',
+        onConfirm: async () => {
+          try {
+            const today = new Date();
+            const tanggal = today.toISOString().slice(0, 10);
+            await DB.insertRow('transaksi_kas', {
+              tahun: Number(ev.tahun) || today.getFullYear(),
+              bulan: today.getMonth() + 1,
+              tanggal,
+              tipe: isSurplus ? 'masuk_lain' : 'keluar',
+              kategori: isSurplus ? 'Sisa Patungan' : 'Defisit Patungan',
+              deskripsi: `${isSurplus ? 'Sisa Patungan' : 'Subsidi Defisit'} — ${ev.nama_event}`,
+              nominal: absSelisih,
+              patungan_id: eventId,
+            });
+            await DB.updateRow('patungan_event', eventId, { status: 'Selesai', terposting_ke_kas: true });
+            showToast('Selisih patungan berhasil diposting ke Buku Kas!', 'success');
+            await refreshData(true);
+          } catch (err) {
+            showToast('Gagal posting ke kas: ' + err.message, 'error');
+          }
+        },
+      });
+    }
+
+    /* ============================================================================
+       7. PAGE: ANGGOTA, PERIODE & PENGATURAN SUPABASE (ADMIN ONLY)
+    ============================================================================ */
+    function renderPengaturanPage() {
+      if (!isAdmin()) {
+        return `<div class="glass-card rounded-2xl p-10 text-center text-sm text-slate-500">Halaman ini khusus untuk Admin / Bendahara IPD 32.</div>`;
+      }
+
+      const tab = State.settingsTab;
+      return `
+        <div class="space-y-5 animate-fade-up">
+          <div>
+            <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Anggota, Periode & Pengaturan</h1>
+            <p class="text-sm text-slate-500 mt-0.5">Kelola daftar anggota & akun login, tarif iuran tahunan, serta koneksi Supabase</p>
+          </div>
+
+          <!-- Sub-Tabs -->
+          <div class="flex flex-wrap gap-2">
+            ${[
+              { id: 'anggota', label: 'Master Anggota', icon: 'users' },
+              { id: 'periode', label: 'Periode & Tarif Kas', icon: 'calendar-range' },
+              { id: 'supabase', label: 'Supabase & Skrip SQL', icon: 'database' },
+            ]
+              .map(
+                (t) => `
+              <button onclick="State.settingsTab='${t.id}'; renderApp();" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition ${
+                tab === t.id ? 'bg-teal-700 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+              }">
+                <i data-lucide="${t.icon}" class="w-4 h-4"></i>
+                <span>${t.label}</span>
+              </button>
+            `
+              )
+              .join('')}
+          </div>
+
+          ${
+            tab === 'anggota'
+              ? renderTabAnggota()
+              : tab === 'periode'
+              ? renderTabPeriode()
+              : renderTabSupabase()
+          }
+        </div>
+      `;
+    }
+
+    function renderTabAnggota() {
+      const q = State.memberSearch.trim().toLowerCase();
+      const list = State.data.anggota.filter(
+        (m) => !q || m.nama.toLowerCase().includes(q) || m.username.toLowerCase().includes(q)
+      );
+
+      return `
+        <div class="glass-card rounded-2xl overflow-hidden">
+          <div class="p-4 sm:p-5 border-b border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div class="relative sm:w-72">
+              <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+              <input type="text" value="${escapeHtml(State.memberSearch)}" oninput="State.memberSearch=this.value; renderApp();"
+                placeholder="Cari nama atau username..."
+                class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
+            </div>
+            <button onclick="openMemberModal()" class="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm">
+              <i data-lucide="user-plus" class="w-4 h-4"></i>
+              <span>Tambah Anggota</span>
+            </button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse min-w-[700px]">
+              <thead>
+                <tr class="bg-slate-50/90 border-b border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                  <th class="py-3 px-4">Nama & Peran</th>
+                  <th class="py-3 px-4">Akun Login Anggota</th>
+                  <th class="py-3 px-4">Status</th>
+                  <th class="py-3 px-4">Catatan / Sejak</th>
+                  <th class="py-3 px-4 text-right w-24">Aksi</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-200/70 text-sm">
+                ${list
+                  .map(
+                    (m) => `
+                  <tr class="hover:bg-slate-50/70 transition">
+                    <td class="py-3 px-4">
+                      <div class="font-bold text-slate-900">${escapeHtml(m.nama)}</div>
+                      <div class="text-xs text-slate-500">${escapeHtml(m.peran)}</div>
+                    </td>
+                    <td class="py-3 px-4 text-xs">
+                      <span class="px-2 py-0.5 rounded bg-slate-100 font-mono text-slate-700">${escapeHtml(m.username)}</span>
+                      <span class="text-slate-400 mx-1">/</span>
+                      <span class="font-mono text-slate-500">${escapeHtml(m.password)}</span>
+                    </td>
+                    <td class="py-3 px-4">
+                      <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                        m.status === 'Aktif' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                      }">${escapeHtml(m.status)}</span>
+                    </td>
+                    <td class="py-3 px-4 text-xs text-slate-600">
+                      <div>${escapeHtml(m.catatan_status || '—')}</div>
+                      ${m.aktif_sejak ? `<div class="text-[11px] text-slate-400">Sejak ${escapeHtml(m.aktif_sejak)}</div>` : ''}
+                    </td>
+                    <td class="py-3 px-4 text-right whitespace-nowrap">
+                      <button onclick="openMemberModal('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-teal-700"><i data-lucide="pencil" class="w-4 h-4"></i></button>
+                      <button onclick="deleteMember('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                    </td>
+                  </tr>
+                `
+                  )
+                  .join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function openMemberModal(editId = null) {
+      const m = editId ? State.data.anggota.find((x) => x.id === editId) : null;
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <h3 class="text-base font-bold text-slate-900">${m ? 'Edit Data Anggota' : 'Tambah Anggota Baru'}</h3>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <form onsubmit="saveMember(event, '${editId || ''}')" class="p-5 space-y-4">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nama Lengkap</label>
+              <input id="mem-nama" type="text" required value="${escapeHtml(m?.nama || '')}" placeholder="Contoh: Ns. Aulia"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Peran</label>
+              <select id="mem-peran" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm">
+                ${['Perawat', 'HCA', 'Dokter', 'Admin Ruangan', 'Lainnya']
+                  .map((r) => `<option value="${r}" ${m?.peran === r ? 'selected' : ''}>${r}</option>`)
+                  .join('')}
+              </select>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Username Login</label>
+              <input id="mem-user" type="text" required value="${escapeHtml(m?.username || '')}" placeholder="huruf kecil tanpa spasi"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-mono" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Password Login</label>
+              <input id="mem-pass" type="text" required value="${escapeHtml(m?.password || 'ipd32')}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-mono" />
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Status</label>
+              <select id="mem-status" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold">
+                ${['Aktif', 'Resign', 'Mutasi', 'Pindah'].map((s) => `<option value="${s}" ${m?.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Aktif Sejak</label>
+              <input id="mem-sejak" type="text" value="${escapeHtml(m?.aktif_sejak || String(new Date().getFullYear()))}" placeholder="Contoh: 2026"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Catatan Status</label>
+            <input id="mem-catatan" type="text" value="${escapeHtml(m?.catatan_status || '')}" placeholder="Contoh: Mutasi ke ICU Juli 2026"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+          </div>
+          <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
+            <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Batal</button>
+            <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan Anggota</button>
+          </div>
+        </form>
+      `, 'max-w-md');
+    }
+
+    async function saveMember(e, editId) {
+      e.preventDefault();
+      const payload = {
+        nama: document.getElementById('mem-nama').value.trim(),
+        peran: document.getElementById('mem-peran').value,
+        username: document.getElementById('mem-user').value.trim().toLowerCase(),
+        password: document.getElementById('mem-pass').value.trim(),
+        status: document.getElementById('mem-status').value,
+        aktif_sejak: document.getElementById('mem-sejak').value.trim(),
+        catatan_status: document.getElementById('mem-catatan').value.trim(),
+      };
+      try {
+        if (editId) {
+          await DB.updateRow('anggota', editId, payload);
+          showToast('Data anggota diperbarui.', 'success');
+        } else {
+          await DB.insertRow('anggota', payload);
+          showToast('Anggota baru ditambahkan.', 'success');
+        }
+        closeModal();
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menyimpan anggota: ' + err.message, 'error');
+      }
+    }
+
+    function deleteMember(id) {
+      openConfirmModal({
+        title: 'Hapus Anggota Ini?',
+        message: 'Jika anggota resign/mutasi, disarankan ubah status menjadi "Resign/Mutasi" agar riwayat iuran historis tetap tersimpan. Yakin ingin menghapus permanen?',
+        confirmLabel: 'Hapus Permanen',
+        danger: true,
+        onConfirm: async () => {
+          try {
+            await DB.deleteRow('anggota', id);
+            showToast('Anggota dihapus.', 'info');
+            await refreshData(true);
+          } catch (err) {
+            showToast('Gagal menghapus: ' + err.message, 'error');
+          }
+        },
+      });
+    }
+
+    function renderTabPeriode() {
+      const list = [...State.data.periode_kas].sort((a, b) => Number(b.tahun) - Number(a.tahun));
+      return `
+        <div class="glass-card rounded-2xl overflow-hidden">
+          <div class="p-4 sm:p-5 border-b border-slate-200/80 flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-base font-bold text-slate-900">Periode & Tarif Iuran Bulanan</h2>
+              <p class="text-xs text-slate-500 mt-0.5">Tambahkan tahun buku baru beserta besaran iuran per bulan</p>
+            </div>
+            <button onclick="openPeriodeModal()" class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm">
+              <i data-lucide="plus" class="w-4 h-4"></i>
+              <span>Tambah Tahun</span>
+            </button>
+          </div>
+          <div class="divide-y divide-slate-200/70">
+            ${list
+              .map(
+                (p) => `
+              <div class="p-4 sm:px-5 flex items-center justify-between gap-4 hover:bg-slate-50/70 transition">
+                <div>
+                  <div class="flex items-center gap-2.5">
+                    <span class="text-base font-extrabold text-slate-900">Tahun ${p.tahun}</span>
+                    <span class="px-2.5 py-0.5 rounded-full bg-teal-50 text-teal-700 text-xs font-bold tabular-nums">${formatRp(p.tarif_bulanan)} / bulan</span>
+                  </div>
+                  <div class="text-xs text-slate-500 mt-1">${escapeHtml(p.keterangan || '—')}</div>
+                </div>
+                <button onclick="openPeriodeModal('${p.id}')" class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700">
+                  Edit Tarif
+                </button>
+              </div>
+            `
+              )
+              .join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function openPeriodeModal(editId = null) {
+      const p = editId ? State.data.periode_kas.find((x) => x.id === editId) : null;
+      const nextYear = Math.max(2026, ...getAvailableYears()) + 1;
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <h3 class="text-base font-bold text-slate-900">${p ? `Edit Tarif Tahun ${p.tahun}` : 'Tambah Periode Tahun Baru'}</h3>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <form onsubmit="savePeriode(event, '${editId || ''}')" class="p-5 space-y-4">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tahun</label>
+              <input id="per-tahun" type="number" required ${p ? 'readonly' : ''} value="${p ? p.tahun : nextYear}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums ${p ? 'bg-slate-50 text-slate-500' : ''}" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tarif Bulanan (Rp)</label>
+              <input id="per-tarif" type="number" min="0" step="1000" required value="${p ? p.tarif_bulanan : 20000}"
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Keterangan</label>
+            <input id="per-ket" type="text" value="${escapeHtml(p?.keterangan || '')}" placeholder="Contoh: Kesepakatan rapat ruangan"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+          </div>
+          <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
+            <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Batal</button>
+            <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan</button>
+          </div>
+        </form>
+      `, 'max-w-md');
+    }
+
+    async function savePeriode(e, editId) {
+      e.preventDefault();
+      const payload = {
+        tahun: Number(document.getElementById('per-tahun').value),
+        tarif_bulanan: Number(document.getElementById('per-tarif').value) || 0,
+        keterangan: document.getElementById('per-ket').value.trim(),
+      };
+      try {
+        if (editId) {
+          await DB.updateRow('periode_kas', editId, { tarif_bulanan: payload.tarif_bulanan, keterangan: payload.keterangan });
+          showToast('Tarif periode diperbarui.', 'success');
+        } else {
+          await DB.insertRow('periode_kas', payload);
+          showToast(`Periode tahun ${payload.tahun} ditambahkan.`, 'success');
+        }
+        closeModal();
+        await refreshData(true);
+      } catch (err) {
+        showToast('Gagal menyimpan periode: ' + err.message, 'error');
+      }
+    }
+
+    function renderTabSupabase() {
+      const isDemo = DB.mode === 'demo';
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <!-- Koneksi Supabase -->
+          <div class="glass-card rounded-2xl p-5 space-y-4">
+            <div class="flex items-center justify-between">
+              <h2 class="text-base font-bold text-slate-900">Koneksi Supabase</h2>
+              <span class="px-2.5 py-1 rounded-full text-xs font-bold ${
+                isDemo ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'
+              }">${isDemo ? 'Mode Demo Lokal' : 'Supabase Live'}</span>
+            </div>
+            <p class="text-xs text-slate-500 leading-relaxed">
+              Masukkan <b>Project URL</b> dan <b>Anon Public Key</b> dari Supabase Dashboard → Project Settings → API. Kosongkan keduanya untuk kembali ke Mode Demo.
+            </p>
+            <form onsubmit="saveSupabaseConfig(event)" class="space-y-3">
+              <div>
+                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Supabase Project URL</label>
+                <input id="sb-url-input" type="url" value="${escapeHtml(DB.url)}" placeholder="https://xxxx.supabase.co"
+                  class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono" />
+              </div>
+              <div>
+                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Supabase Anon Public Key</label>
+                <input id="sb-key-input" type="text" value="${escapeHtml(DB.key)}" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
+                  class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono" />
+              </div>
+              <div class="flex flex-wrap gap-2 pt-2">
+                <button type="submit" class="px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm">
+                  Simpan & Hubungkan
+                </button>
+                <button type="button" onclick="exportBackupJson()" class="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold">
+                  Unduh Backup JSON
+                </button>
+                ${
+                  isDemo
+                    ? `<button type="button" onclick="confirmResetDemo()" class="px-4 py-2.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold">Reset Data Demo</button>`
+                    : ''
+                }
+              </div>
+            </form>
+          </div>
+
+          <!-- Skrip SQL Migrasi -->
+          <div class="glass-card rounded-2xl p-5 flex flex-col">
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <div>
+                <h2 class="text-base font-bold text-slate-900">Skrip SQL Setup Tabel</h2>
+                <p class="text-xs text-slate-500 mt-0.5">Salin dan jalankan di Supabase SQL Editor</p>
+              </div>
+              <button onclick="copyTextToClipboard(SUPABASE_SQL_SCRIPT, 'Skrip SQL berhasil disalin!')" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shadow-sm">
+                <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                <span>Salin SQL</span>
+              </button>
+            </div>
+            <pre class="flex-1 max-h-72 overflow-auto p-3.5 rounded-xl bg-slate-900 text-slate-100 text-[11px] font-mono leading-relaxed select-all">${escapeHtml(SUPABASE_SQL_SCRIPT)}</pre>
+          </div>
+        </div>
+      `;
+    }
+
+    function openSupabaseConfigModal() {
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <h3 class="text-base font-bold text-slate-900">Konfigurasi Koneksi Supabase</h3>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <form onsubmit="saveSupabaseConfig(event, true)" class="p-5 space-y-4">
+          <p class="text-xs text-slate-600 leading-relaxed">
+            Hubungkan ke proyek Supabase Anda untuk penyimpanan cloud & login Admin via Supabase Auth. Kosongkan untuk menggunakan Mode Demo Lokal.
+          </p>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Supabase Project URL</label>
+            <input id="sb-url-input" type="url" value="${escapeHtml(DB.url)}" placeholder="https://xxxx.supabase.co"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Supabase Anon Public Key</label>
+            <input id="sb-key-input" type="text" value="${escapeHtml(DB.key)}" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono" />
+          </div>
+          <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
+            <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Tutup</button>
+            <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan & Terapkan</button>
+          </div>
+        </form>
+      `, 'max-w-md');
+    }
+
+    function openSqlGuideModal() {
+      openModal(`
+        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-bold text-slate-900">Skrip SQL Setup Supabase (7 Tabel + RLS)</h3>
+            <p class="text-xs text-slate-500 mt-0.5">Buka Supabase Dashboard → SQL Editor → Paste → Run</p>
+          </div>
+          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
+        <div class="p-5 overflow-y-auto space-y-3">
+          <div class="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900">
+            <b>Langkah Admin:</b> Setelah menjalankan SQL ini, buat 1 akun Admin di menu <b>Supabase → Authentication → Users → Add User</b> (Email & Password). Anggota cukup didaftarkan di tabel <code>anggota</code>.
+          </div>
+          <pre class="max-h-80 overflow-auto p-3.5 rounded-xl bg-slate-900 text-slate-100 text-[11px] font-mono leading-relaxed select-all">${escapeHtml(SUPABASE_SQL_SCRIPT)}</pre>
+          <div class="flex justify-end gap-2 pt-2">
+            <button onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Tutup</button>
+            <button onclick="copyTextToClipboard(SUPABASE_SQL_SCRIPT, 'Skrip SQL berhasil disalin!')" class="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">
+              <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+              <span>Salin Semua SQL</span>
+            </button>
+          </div>
+        </div>
+      `, 'max-w-2xl');
+    }
+
+    async function saveSupabaseConfig(e, fromModal = false) {
+      e.preventDefault();
+      const url = (document.getElementById('sb-url-input')?.value || '').trim();
+      const key = (document.getElementById('sb-key-input')?.value || '').trim();
+
+      localStorage.setItem(STORAGE_KEYS.SB_URL, url);
+      localStorage.setItem(STORAGE_KEYS.SB_KEY, key);
+      localStorage.removeItem(STORAGE_KEYS.SESSION);
+      State.session = null;
+
+      DB.init();
+      if (fromModal) closeModal();
+      showToast(
+        DB.mode === 'supabase'
+          ? 'Konfigurasi Supabase disimpan! Silakan login kembali.'
+          : 'Beralih ke Mode Preview Demo Lokal.',
+        'success'
+      );
+      renderApp();
+    }
+
+    function confirmResetDemo() {
+      openConfirmModal({
+        title: 'Reset Data Demo?',
+        message: 'Seluruh perubahan di Mode Demo Lokal akan dikembalikan ke data awal contoh IPD 32.',
+        confirmLabel: 'Reset Data',
+        danger: true,
+        onConfirm: async () => {
+          DB.resetDemoStore();
+          showToast('Data demo berhasil direset.', 'info');
+          await refreshData();
+        },
+      });
+    }
+
+    function exportBackupJson() {
+      const blob = new Blob([JSON.stringify(State.data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Backup_KAS_IPD32_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('File backup JSON berhasil diunduh.', 'success');
+    }
+
+    // Tutup modal dengan tombol Escape
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
+    });
+
+    // Jalankan aplikasi saat DOM siap
+    window.addEventListener('DOMContentLoaded', bootstrap);
+  </script>
+</body>
+</html>

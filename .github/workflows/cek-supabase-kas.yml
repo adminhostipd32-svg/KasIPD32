@@ -13,18 +13,29 @@ permissions: {}
 
 jobs:
   cek-database:
+    name: Cek ${{ matrix.proyek }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - proyek: produksi
+            url: https://blplhbwuteteuojxzkmk.supabase.co
+            publishable_key: sb_publishable_CT0KHwZvZUlAtC4fsuwVuQ_byxvcKY1
+          - proyek: kas-ipd32-dev
+            url: https://qkfxfwbxodhqsycyjhom.supabase.co
+            publishable_key: sb_publishable_53oiIMbggpaqkCZoBQcYUA_-juOwRIF
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Periksa akses baca ke periode kas produksi
+      - name: Periksa akses baca ke periode kas
         env:
-          SUPABASE_URL: https://blplhbwuteteuojxzkmk.supabase.co
+          SUPABASE_URL: ${{ matrix.url }}
           # Publishable key yang juga dipakai frontend. Akses mengikuti RLS.
-          SUPABASE_PUBLISHABLE_KEY: sb_publishable_CT0KHwZvZUlAtC4fsuwVuQ_byxvcKY1
+          SUPABASE_PUBLISHABLE_KEY: ${{ matrix.publishable_key }}
         run: |
           status=$(curl --silent --show-error --fail --retry 2 --connect-timeout 10 --max-time 25 \
             --header "apikey: $SUPABASE_PUBLISHABLE_KEY" \
             --output /dev/null --write-out '%{http_code}' \
             "$SUPABASE_URL/rest/v1/periode_kas?select=tahun&limit=1")
-          echo "Supabase produksi merespons HTTP $status"
+          echo "Supabase merespons HTTP $status"
           test "$status" = 200

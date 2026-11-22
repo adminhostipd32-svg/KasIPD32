@@ -4116,6 +4116,39 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     class DatabaseCheckPanel extends HTMLElement {
+      filters = {from:'', until:'', status:''};
+      applyHistoryFilters(form) {
+        const {from,until,status} = form.elements;
+        if (from.value && until.value && from.value > until.value) {
+          until.setCustomValidity('Tanggal akhir harus sama atau sesudah tanggal awal.');
+          until.reportValidity();
+          until.setCustomValidity('');
+          return;
+        }
+        this.filters = {from:from.value, until:until.value, status:status.value};
+        this.drawHistory();
+      }
+      drawHistory() {
+        const list = this.querySelector('[data-history-list]');
+        if (!list) return;
+        const {from,until,status} = this.filters;
+        const active = Boolean(from || until || status);
+        const fromMs = from ? Date.parse(from+'T00:00:00+07:00') : -Infinity;
+        const untilMs = until ? Date.parse(until+'T00:00:00+07:00')+86400000 : Infinity;
+        list.innerHTML = healthTargets.map((target,i)=>{
+          const history = healthCache.results?.[i]?.history || [];
+          const rows = history.map((check,index)=>{
+            const ms = Date.parse(check.time);
+            const state = !check.ok ? 'failed' : history[index+1]?.ok===false ? 'recovered' : 'success';
+            if (ms < fromMs || ms >= untilMs || (status && state!==status)) return '';
+            const when = new Date(ms).toLocaleString('id-ID',{timeZone:'Asia/Jakarta',dateStyle:'medium',timeStyle:'medium'});
+            const label = {failed:'Gagal',recovered:'Berhasil kembali',success:'Berhasil'}[state];
+            return `<li class="flex flex-wrap gap-2 items-center justify-between px-4 py-2 text-xs"><time datetime="${escapeHtml(check.time)}">${when} WIB</time><b class="${check.ok?'text-emerald-700':'text-rose-700'}">${label}</b></li>`;
+          }).join('');
+          const empty = active ? 'Tidak ada hasil yang cocok pada riwayat yang dimuat.' : 'Belum ada hasil yang dimuat.';
+          return `<div class="rounded-xl border border-slate-200 overflow-hidden"><h4 class="bg-teal-50 px-4 py-2 font-semibold">${target.label}</h4>${rows?`<ol class="divide-y max-h-80 overflow-y-auto">${rows}</ol>`:`<p class="p-4 text-sm text-slate-500">${empty}</p>`}</div>`;
+        }).join('');
+      }
       connectedCallback() { this.refresh(); }
       async older() {
         if (healthCache.pending || !healthCache.hasMore || State.session?.role !== 'it_support') return;
@@ -4139,16 +4172,15 @@ ON CONFLICT (username) DO NOTHING;
                 ${row?.latest?`<p class="mt-1 text-xs text-slate-500">${row.latest}</p>`:''}</div>`;
             }).join('')}</div>
             <h3 class="font-bold text-slate-900">Riwayat pengecekan</h3>
-            <div class="grid gap-3 sm:grid-cols-2">${healthTargets.map((target,i)=>{
-              const checks=healthCache.results?.[i]?.history || [];
-              return `<div class="rounded-xl border border-slate-200 overflow-hidden"><h4 class="bg-teal-50 px-4 py-2 font-semibold">${target.label}</h4>${checks.length?`<ol class="divide-y max-h-80 overflow-y-auto">${checks.map((c,index)=>{
-                const recovered=c.ok && checks[index+1]?.ok===false;
-                const label=recovered?'Berhasil kembali':c.ok?'Berhasil':'Gagal';
-                const when=new Date(c.time).toLocaleString('id-ID',{timeZone:'Asia/Jakarta',dateStyle:'medium',timeStyle:'medium'});
-                return `<li class="flex flex-wrap gap-2 items-center justify-between px-4 py-2 text-xs"><time datetime="${escapeHtml(c.time)}">${when} WIB</time><b class="${c.ok?'text-emerald-700':'text-rose-700'}">${label}</b></li>`;
-              }).join('')}</ol>`:'<p class="p-4 text-sm text-slate-500">Belum ada hasil yang dimuat.</p>'}</div>`;
-            }).join('')}</div>
+            <form class="grid gap-3 sm:grid-cols-3 bg-slate-50 rounded-xl p-3 text-xs font-semibold" onsubmit="event.preventDefault();this.closest('database-check-panel').applyHistoryFilters(this)">
+              <label>Dari tanggal (WIB)<input class="block w-full mt-1 border rounded-lg p-2" type="date" name="from" value="${escapeHtml(this.filters.from)}"></label>
+              <label>Sampai tanggal (WIB)<input class="block w-full mt-1 border rounded-lg p-2" type="date" name="until" value="${escapeHtml(this.filters.until)}"></label>
+              <label>Status<select class="block w-full mt-1 border rounded-lg p-2" name="status">${[['','Semua status'],['failed','Gagal'],['recovered','Berhasil kembali'],['success','Berhasil']].map(([value,label])=>`<option value="${value}" ${value===this.filters.status?'selected':''}>${label}</option>`).join('')}</select></label>
+              <div class="flex gap-3"><button class="rounded-lg bg-teal-700 text-white px-3 py-2">Terapkan filter</button><button type="button" onclick="this.form.elements.from.value='';this.form.elements.until.value='';this.form.elements.status.value='';this.form.requestSubmit()">Reset</button></div>
+            </form>
+            <div data-history-list class="grid gap-3 sm:grid-cols-2" aria-live="polite"></div>
             ${healthCache.hasMore?`<button type="button" ${busy?'disabled':''} class="rounded-xl border px-3 py-2 text-xs font-semibold" onclick="this.closest('database-check-panel').older()">Muat riwayat lebih lama</button>`:''}</section>`;
+          this.drawHistory();
         };
         if (!force && healthCache.results && Date.now()-healthCache.fetchedAt < 60000) { draw(false); return; }
         draw(true);

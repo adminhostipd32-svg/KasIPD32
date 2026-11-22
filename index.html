@@ -112,6 +112,29 @@
     .animate-fade-up {
       animation: fadeSlideUp 0.22s ease-out forwards;
     }
+    .dash-switch {display:inline-flex;max-width:100%;gap:4px;background:#e2e8f0;padding:4px;border-radius:14px}
+    .dash-switch button {display:flex;align-items:center;justify-content:center;gap:8px;padding:9px 15px;border-radius:10px;font-size:13px;font-weight:700;color:#475569}
+    .dash-switch button[aria-pressed=true] {background:white;color:#0f172a;box-shadow:0 1px 4px #0f172a20}
+    .dash-switch svg,.report-section-title svg,.report-tile>svg {width:18px;height:18px;flex-shrink:0}
+    .report-banner {padding:20px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;color:white;border-radius:18px}
+    .personal-banner {background:linear-gradient(110deg,#173664,#215782)}
+    .general-banner {background:linear-gradient(110deg,#124e4c,#176c63)}
+    .report-banner h1 {font-size:clamp(21px,3vw,28px);font-weight:800;letter-spacing:-.035em}
+    .report-banner p,.report-banner label {font-size:13px;color:#e2edf4}
+    .report-banner select {background:white;color:#1e293b;margin-left:6px}
+    .report-tiles {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+    .report-tile {border:1px solid #dce5ea;padding:16px;border-radius:16px;min-width:0}
+    .report-tile>svg {margin-bottom:12px}
+    .report-tile p {font-size:12px;font-weight:650}
+    .report-tile strong {display:block;font-variant-numeric:tabular-nums;font-size:clamp(16px,2vw,23px);letter-spacing:-.025em;overflow-wrap:anywhere}
+    .tile-total {background:#173664;color:white;border-color:#173664}
+    .tile-dues,.section-dues {background:#eaf4fc;color:#174f7b}
+    .tile-events,.section-events {background:#f2edfb;color:#624494}
+    .tile-future {background:#fff5db;color:#805611}
+    .section-general {background:#e6f5f1;color:#14594f}
+    .section-expense {background:#fff0ee;color:#913c36}
+    .report-section-title {display:flex;gap:9px;align-items:center;font-size:15px;font-weight:750;padding:14px 16px}
+    @media(max-width:767px){.report-tiles{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.report-tile{padding:12px}.report-banner{padding:16px}.dash-switch{display:flex}.dash-switch button{flex:1}}
   </style>
 </head>
 <body>
@@ -1191,6 +1214,7 @@ ON CONFLICT (username) DO NOTHING;
       reportMonth: 0,
       reportYear: null,
       personalYear: 0,
+      dashboardScope: 'personal',
       masterYear: 0,
       iuranSearch: '',
       iuranStatusFilter: 'Semua',
@@ -1506,6 +1530,7 @@ ON CONFLICT (username) DO NOTHING;
             : await DB.loginAnggota(identifier, password);
 
         State.session = session;
+        State.dashboardScope = 'personal';
         State.activePage = 'dashboard';
         localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(session));
         showToast(`Selamat datang, ${session.nama}!`, 'success');
@@ -1737,14 +1762,17 @@ ON CONFLICT (username) DO NOTHING;
       const receipts = personalMember ? State.data.iuran_kas.filter(inPersonalPeriod).reduce((sum,row)=>sum+Number(row.nominal),0) : 0;
       const overpaid = personalMember ? State.data.saldo_lebih_bayar.filter(inPersonalPeriod).reduce((sum,row)=>sum+Number(row.nominal),0) : 0;
 
+      const switcher = personalMember ? `<div class="dash-switch" role="group" aria-label="Pilih dashboard">${[['personal','Tagihan saya','user-round'],['general','Kas ruangan','landmark']].map(([scope,label,icon])=>`<button aria-pressed="${State.dashboardScope===scope}" onclick="State.dashboardScope='${scope}';renderApp()"><i data-lucide="${icon}"></i>${label}</button>`).join('')}</div>` : '';
+      if(personalMember && State.dashboardScope==='personal') return `<div class="space-y-4">${switcher}<section class="space-y-3"><div class="report-banner personal-banner"><div><h1>Tagihan saya</h1><p>${escapeHtml(personalMember.nama)} · Iuran dan patungan pribadi</p></div><label class="text-sm">Tahun <select id="personal-year" class="border rounded-xl p-2" onchange="State.personalYear=Number(this.value);renderApp()">${yearOptions(State.personalYear)}</select></label></div><div class="flex flex-wrap gap-3 items-center justify-between text-xs text-slate-600"><span>Setoran iuran <b>${formatRp(receipts)}</b> · Lebih bayar <b>${formatRp(overpaid)}</b></span><div class="flex gap-3"><button class="text-slate-600" onclick="refreshData()">Refresh</button><button class="rounded-xl px-3 py-2 bg-teal-50 text-teal-800 font-bold" onclick="if(State.personalYear)State.selectedYear=State.personalYear;navigateTo('iuran')">Lihat Matriks</button></div></div>${memberBalanceCard(personalMember,State.personalYear,12,false)}</section></div>`;
       const maxBarVal = Math.max(1, ...recap.rows.map((r) => Math.max(r.totalMasuk, r.totalKeluar)));
 
       return `
         <div class="space-y-6 animate-fade-up">
+          ${switcher}
           <!-- Page Header -->
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Dashboard & Rekap Tahunan</h1>
+              <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">${personalMember?'Kas ruangan IPD 32':'Dashboard & Rekap Tahunan'}</h1>
               <p class="text-sm text-slate-500 mt-0.5">Ringkasan kas kumulatif IPD 32 lintas periode (${getAvailableYears()[0]}–${getAvailableYears().slice(-1)[0]})</p>
             </div>
             <div class="flex flex-wrap items-center gap-2">
@@ -1764,8 +1792,6 @@ ON CONFLICT (username) DO NOTHING;
               }
             </div>
           </div>
-
-          ${personalMember ? `<section class="space-y-3"><div class="flex flex-wrap gap-3 items-center justify-between"><h2 class="text-lg font-bold">Tagihan saya</h2><label class="text-sm">Tahun <select id="personal-year" class="border rounded-xl p-2" onchange="State.personalYear=Number(this.value);renderApp()">${yearOptions(State.personalYear)}</select></label></div><div class="flex flex-wrap gap-3 items-center justify-between text-xs text-slate-600"><span>Setoran iuran ${formatRp(receipts)} · Lebih bayar ${formatRp(overpaid)}</span><button class="rounded-xl px-3 py-2 bg-teal-50 text-teal-800 font-bold" onclick="if(State.personalYear)State.selectedYear=State.personalYear;navigateTo('iuran')">Lihat Matriks</button></div>${memberBalanceCard(personalMember,State.personalYear)}</section>` : ''}
 
           <!-- 4 KPI Cards -->
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
@@ -2048,7 +2074,7 @@ ON CONFLICT (username) DO NOTHING;
       return `<option value="0" ${!year?'selected':''}>Semua tahun</option>`+getAvailableYears().map(y=>`<option value="${y}" ${y===year?'selected':''}>${y}</option>`).join('');
     }
 
-    function memberBalanceCard(member, year, throughMonth = 12) {
+    function memberBalanceCard(member, year, throughMonth = 12, showHeading = true) {
       if (!member) return '';
       const years = year ? [year] : getAvailableYears();
       const periods = years.map(y => memberBalanceForYear(member,y,throughMonth));
@@ -2061,23 +2087,30 @@ ON CONFLICT (username) DO NOTHING;
       });
       const total = sum(yearly,'total');
       const future = sum(yearly,'future');
-      const cues = [['Sisa iuran',sum(yearly,'dues')],['Sisa patungan',sum(yearly,'events')],['Total belum dibayar',total],['Iuran belum jatuh tempo',future]];
-      const details = periods.flatMap(p=>[
-        ...p.pending.map(m=>[p.year,'Iuran',m.full,m.future?'Belum jatuh tempo':'Belum lunas',formatRp(m.target),formatRp(m.paid),formatRp(m.remaining)]),
-        ...p.unpaid.map(e=>[p.year,'Patungan',e.name,'Belum lunas',formatRp(e.target),formatRp(e.paid),formatRp(e.remaining)])
-      ]);
-      return `<section class="space-y-4"><h3 class="font-bold text-slate-900">${escapeHtml(member.nama)} · ${year||'Semua tahun'}</h3>
-        <div class="grid grid-cols-2 xl:grid-cols-4 gap-3">${cues.map(([label,v])=>`<div class="glass-card rounded-2xl p-4"><p class="text-xs text-slate-500">${label}</p><strong class="text-lg tabular-nums">${formatRp(v)}</strong></div>`).join('')}</div>
+      const cues = [
+        ['Total belum dibayar',total,'total','wallet'], ['Sisa iuran',sum(yearly,'dues'),'dues','calendar-days'],
+        ['Sisa patungan',sum(yearly,'events'),'events','users'], ['Iuran belum jatuh tempo',future,'future','clock']
+      ];
+      const duesRows = periods.flatMap(p=>p.pending.map(m=>[m.full+' '+p.year,m.future?'Belum jatuh tempo':'Belum lunas',formatRp(m.target),formatRp(m.paid),formatRp(m.remaining)]));
+      const eventRows = periods.flatMap(p=>p.unpaid.map(e=>[e.name,p.year,formatRp(e.target),formatRp(e.paid),formatRp(e.remaining)]));
+      return `<section class="space-y-4">${showHeading?`<h3 class="font-bold text-slate-900">${escapeHtml(member.nama)} · ${year||'Semua tahun'}</h3>`:''}
+        <div class="report-tiles">${cues.map(([label,v,tone,icon])=>`<div class="report-tile tile-${tone}"><i data-lucide="${icon}" aria-hidden="true"></i><p>${label}</p><strong>${formatRp(v)}</strong></div>`).join('')}</div>
         <p class="text-xs text-slate-500">Total mencakup iuran sampai ${MONTHS[throughMonth-1].full}, termasuk bulan mendatang, serta sisa patungan tahun acara.</p>
         ${reportTable('Rekap per tahun',['Tahun','Sisa iuran','Sisa patungan','Total belum dibayar'],yearly.filter(y=>y.total>0).map(y=>[y.year,formatRp(y.dues),formatRp(y.events),formatRp(y.total)]),'Tidak ada sisa tagihan yang tercatat.')}
-        ${reportTable('Rincian tagihan',['Tahun','Jenis','Bulan / acara','Status','Target','Dibayar','Sisa'],details,'Tidak ada rincian tagihan pada periode ini.')}
+        ${reportTable('Rincian iuran',['Bulan','Status','Target','Dibayar','Sisa'],duesRows,'Tidak ada sisa iuran pada periode ini.')}
+        ${reportTable('Rincian patungan',['Acara','Tahun','Target','Dibayar','Sisa'],eventRows,'Tidak ada sisa patungan pada periode ini.')}
         ${periods.filter(p=>p.note).map(p=>`<p class="text-xs text-slate-500">${p.year} · ${p.note}</p>`).join('')}</section>`;
     }
 
     function reportTable(title, headers, rows, empty = '', cellAction = null) {
+      const [tone,icon] = ({
+        'Rincian iuran':['dues','calendar-days'],'Rincian patungan':['events','users'],
+        'Patungan acara':['events','users'],'Penggunaan dana':['expense','arrow-up-right'],
+        'Arus kas':['general','arrow-left-right']
+      })[title] || ['general','landmark'];
       const cells = rows.map((row,rowIndex) => `<tr class="hover:bg-slate-50/70 transition">${row.map((v,i) => `<td class="px-4 py-3 ${i ? 'text-right whitespace-nowrap tabular-nums font-semibold' : 'text-left font-medium'}">${cellAction?.(v,i,rowIndex) ?? escapeHtml(String(v))}</td>`).join('')}</tr>`).join('');
       return `<section class="glass-card rounded-2xl overflow-hidden min-w-0">
-        <h3 class="px-4 py-4 sm:px-5 font-bold text-slate-900">${title}</h3>${rows.length
+        <h3 class="report-section-title section-${tone}"><i aria-hidden="true" data-lucide="${icon}"></i>${title}</h3>${rows.length
         ? `<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="bg-slate-50/95 border-y border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">${headers.map((h,i) => `<th scope="col" class="px-4 py-3 whitespace-nowrap ${i ? 'text-right' : 'text-left'}">${h}</th>`).join('')}</tr></thead><tbody class="divide-y divide-slate-200/70">${cells}</tbody></table></div>`
         : `<p class="px-5 pb-5 text-sm text-slate-500">${empty}</p>`}</section>`;
     }
@@ -2126,10 +2159,9 @@ ON CONFLICT (username) DO NOTHING;
       const periodLabel = reportYear ? `${month ? MONTHS[month - 1].full : 'Tahun'} ${year}` : 'Semua tahun';
       const selectStyle = 'rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 focus:ring-2 focus:ring-teal-600/25';
       return `<div class="space-y-5 animate-fade-up">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div><h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Laporan Anggota</h1>
-          <p class="text-sm text-slate-500 mt-0.5">Rekap kas IPD 32 · ${periodLabel}</p></div>
-          <button class="inline-flex items-center justify-center gap-2 self-start sm:self-auto px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm transition active:scale-[0.98]" onclick="printMemberReport()"><i data-lucide="printer" class="w-4 h-4"></i>Cetak / Simpan PDF</button>
+        <div class="report-banner ${State.reportMember?'personal-banner':'general-banner'}">
+          <div><h1>Laporan Anggota</h1><p>${State.reportMember?'Tagihan per anggota':'Rekap kas ruangan'} · ${periodLabel}</p></div>
+          <button class="inline-flex items-center justify-center gap-2 self-start sm:self-auto px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 text-teal-900 text-xs font-bold shadow-sm transition active:scale-[0.98]" onclick="printMemberReport()"><i data-lucide="printer" class="w-4 h-4"></i>Cetak / Simpan PDF</button>
         </div>
         <div class="glass-card rounded-2xl p-4 grid grid-cols-2 sm:flex sm:items-end gap-3">
           <label class="grid gap-1.5 text-xs font-semibold text-slate-500">Tahun<select class="${selectStyle}" id="report-year" onchange="State.reportYear=Number(this.value);renderApp()">${yearOptions(reportYear)}</select></label>
@@ -2138,7 +2170,7 @@ ON CONFLICT (username) DO NOTHING;
         </div>
         <article id="member-report" class="space-y-4">
         <header class="hidden"><h2>Laporan Kas IPD 32</h2><p>${periodLabel} · Disusun ${new Date().toLocaleDateString('id-ID')}</p></header>
-        ${State.reportMember ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.reportMember),reportYear,month||12) : !reportYear ? reportTable('Rekap kas semua tahun',['Tahun','Pemasukan','Pengeluaran','Saldo tahun','Saldo kumulatif'],computeAnnualRecap().rows.map(r=>[r.tahun,formatRp(r.totalMasuk),formatRp(r.totalKeluar),formatRp(r.saldoTahun),formatRp(r.saldoKumulatif)])) : `<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">${summary.map(([label,v,icon,tone])=>`<div class="glass-card rounded-2xl p-3 sm:p-5 min-w-0">
+        ${State.reportMember ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.reportMember),reportYear,month||12) : !reportYear ? reportTable('Rekap kas semua tahun',['Tahun','Pemasukan','Pengeluaran','Saldo tahun','Saldo kumulatif'],computeAnnualRecap().rows.map(r=>[r.tahun,formatRp(r.totalMasuk),formatRp(r.totalKeluar),formatRp(r.saldoTahun),formatRp(r.saldoKumulatif)])) : `<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">${summary.map(([label,v,icon,tone])=>`<div class="report-tile ${tone}">
           <div class="flex items-center justify-between gap-1 mb-3"><span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">${label}</span>
           <span aria-hidden="true" class="w-7 h-7 sm:w-9 sm:h-9 shrink-0 rounded-xl flex items-center justify-center ${tone}"><i data-lucide="${icon}" class="w-4 h-4"></i></span></div>
           <strong class="text-base sm:text-xl xl:text-2xl font-extrabold tabular-nums ${v < 0 ? 'text-rose-700' : 'text-slate-900'}">${formatRp(v)}</strong></div>`).join('')}</div>
@@ -2158,7 +2190,7 @@ ON CONFLICT (username) DO NOTHING;
       doc.title = 'Laporan Kas IPD 32 - ' + report.querySelector('header p').textContent.split(' · ')[0];
       doc.documentElement.lang = 'id';
       const style = doc.createElement('style');
-      style.textContent = '@page{size:A4;margin:14mm}body{font:11pt Arial;color:#173536}h2,h3{break-after:avoid}article>.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}table{width:100%;border-collapse:collapse}th,td{padding:5px;border-bottom:1px solid #ccc;text-align:right}th:first-child,td:first-child{text-align:left}th button{all:unset}tr{break-inside:avoid}p{margin:8px 0}';
+      style.textContent = '@page{size:A4;margin:14mm}body{font:11pt Arial;color:#173536}h2,h3{break-after:avoid}article svg{display:none}.report-tiles,article>.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.report-tile{border:1px solid #cbd5e1;padding:6px}.report-tile strong{font-variant-numeric:tabular-nums}table{width:100%;border-collapse:collapse}th,td{padding:5px;border-bottom:1px solid #ccc;text-align:right}th:first-child,td:first-child{text-align:left}th button{all:unset}tr{break-inside:avoid}p{margin:8px 0}';
       doc.head.append(style);
       doc.body.append(doc.importNode(report,true));
       preview.focus();

@@ -3605,15 +3605,32 @@ ON CONFLICT (username) DO NOTHING;
       anggota:'Master anggota', periode_kas:'Periode dan tarif', iuran_kas:'Iuran',
       saldo_lebih_bayar:'Lebih bayar', transaksi_kas:'Buku Kas', patungan_event:'Acara', patungan_peserta:'Peserta patungan'
     };
-    const auditView = { rows:[], loading:false, error:'', older:false, cursors:[null], request:0 };
+    const auditView = { rows:[], loading:false, error:'', older:false, cursors:[null], request:0, filters:{} };
     function resetAuditView() {
-      Object.assign(auditView,{rows:[],loading:false,error:'',older:false,cursors:[null],request:auditView.request+1});
+      Object.assign(auditView,{rows:[],loading:false,error:'',older:false,cursors:[null],request:auditView.request+1,filters:{}});
+    }
+
+    function applyAuditFilters(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const {dari,sampai,pelaku,aksi} = form.elements;
+      if (dari.value && sampai.value && dari.value > sampai.value) {
+        sampai.setCustomValidity('Tanggal akhir harus sama atau sesudah tanggal awal.');
+        sampai.reportValidity();
+        sampai.setCustomValidity('');
+        return;
+      }
+      auditView.filters = {dari:dari.value, sampai:sampai.value, pelaku:pelaku.value.trim(), aksi:aksi.value};
+      loadAuditPage();
     }
 
     async function loadAuditPage(direction='latest') {
       if(!isAdmin())return;
       const state=auditView;
-      if(direction==='latest')resetAuditView();
+      if(direction==='latest'){
+        state.loading=false;
+        state.rows=[]; state.cursors=[null]; state.older=false;
+      }
       if(state.loading)return;
       const cursors=state.cursors.slice();
       if(direction==='older' && state.older)cursors.push(state.rows.at(-1).id);
@@ -3623,7 +3640,8 @@ ON CONFLICT (username) DO NOTHING;
       try{
         let rows=[];
         if(DB.mode==='supabase'){
-          const {data,error}=await DB.client.rpc('baca_log_kas',{p_sebelum:cursors.at(-1)});
+          const f=state.filters;
+          const {data,error}=await DB.client.rpc('cari_log_kas',{p_sebelum:cursors.at(-1),p_dari:f.dari||null,p_sampai:f.sampai||null,p_pelaku:f.pelaku||null,p_aksi:f.aksi||null});
           if(error)throw error;
           rows=data;
         }
@@ -3662,8 +3680,17 @@ ON CONFLICT (username) DO NOTHING;
       if(loading)message='Memuat aktivitas…';
       else if(error)message=error;
       else if(DB.mode==='demo')message='Log database tersedia saat terhubung ke Supabase.';
-      else if(!rows.length)message='Belum ada perubahan sejak pencatatan diaktifkan.';
+      else if(!rows.length)message=Object.values(auditView.filters).some(Boolean)?'Tidak ada aktivitas yang cocok dengan filter.':'Belum ada perubahan sejak pencatatan diaktifkan.';
+      const f=auditView.filters;
+      const field='block w-full mt-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800';
       return `<section class="glass-card rounded-2xl overflow-hidden"><header class="p-4 flex justify-between items-center gap-3"><div><h2 class="font-bold">Log Aktivitas</h2><p class="text-xs text-slate-500">Perubahan data kas · Waktu Indonesia Barat</p></div><button class="border rounded-xl px-3 py-2 text-xs" onclick="loadAuditPage()">Muat terbaru</button></header>
+        <form onsubmit="applyAuditFilters(event)" class="p-4 border-y border-slate-200 bg-slate-50 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-semibold text-slate-600">
+          <label>Dari tanggal (WIB)<input type="date" name="dari" class="${field}" value="${escapeHtml(f.dari||'')}"></label>
+          <label>Sampai tanggal (WIB)<input type="date" name="sampai" class="${field}" value="${escapeHtml(f.sampai||'')}"></label>
+          <label>Pelaku<input type="search" name="pelaku" class="${field}" placeholder="Email atau sebagian nama akun" value="${escapeHtml(f.pelaku||'')}"></label>
+          <label>Jenis aktivitas<select name="aksi" class="${field}">${[['','Semua aktivitas'],['INSERT','Tambah'],['UPDATE','Ubah'],['DELETE','Hapus']].map(([v,label])=>`<option value="${v}" ${v===f.aksi?'selected':''}>${label}</option>`).join('')}</select></label>
+          <div class="flex gap-3 sm:col-span-2"><button class="rounded-xl bg-teal-700 px-3 py-2 text-white">Terapkan filter</button><button type="button" onclick="auditView.filters={};loadAuditPage()" class="px-3 py-2">Reset filter</button></div>
+        </form>
         ${message?`<p class="p-4 text-sm" role="status">${escapeHtml(message)}</p>`:`<div class="overflow-x-auto"><table class="w-full min-w-[640px] text-left text-sm"><thead class="bg-teal-50"><tr>${['Waktu (WIB)','Pelaku','Aktivitas','Detail'].map(x=>`<th class="p-3">${x}</th>`).join('')}</tr></thead><tbody class="divide-y">${records}</tbody></table></div>`}
         ${!loading && !error && (older||cursors.length>1)?`<footer class="flex justify-between p-4 text-sm"><button ${cursors.length===1?'disabled':''} onclick="loadAuditPage('newer')">Lebih baru</button><button ${!older?'disabled':''} onclick="loadAuditPage('older')">Lebih lama</button></footer>`:''}</section>`;
     }

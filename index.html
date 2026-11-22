@@ -810,14 +810,14 @@ ON CONFLICT (username) DO NOTHING;
       key: '',
 
       init() {
-        const savedUrl = (localStorage.getItem(STORAGE_KEYS.SB_URL) || DEFAULT_SUPABASE_URL || '').trim();
-        const savedKey = (localStorage.getItem(STORAGE_KEYS.SB_KEY) || DEFAULT_SUPABASE_ANON_KEY || '').trim();
+        const savedUrl = (DEFAULT_SUPABASE_URL || '').trim();
+        const savedKey = (DEFAULT_SUPABASE_ANON_KEY || '').trim();
         this.url = savedUrl;
         this.key = savedKey;
 
         if (savedUrl && savedKey && window.supabase && typeof window.supabase.createClient === 'function') {
           try {
-            this.client = window.supabase.createClient(savedUrl, savedKey);
+            this.client = window.supabase.createClient(savedUrl.replace(/\/rest\/v1\/?$/, ''), savedKey);
             this.mode = 'supabase';
           } catch (e) {
             console.error('Supabase init error:', e);
@@ -892,7 +892,7 @@ ON CONFLICT (username) DO NOTHING;
           const { data, error } = await this.client.auth.signInWithPassword({ email, password });
           if (error) throw new Error(error.message);
           return {
-            role: 'admin',
+            role: data.user.app_metadata?.kas_role === 'it_support' ? 'it_support' : 'admin',
             nama: data.user?.email?.split('@')[0] || 'Bendahara IPD 32',
             email: data.user?.email,
             id: data.user?.id,
@@ -1072,7 +1072,6 @@ ON CONFLICT (username) DO NOTHING;
     ============================================================================ */
     const State = {
       session: null, // { role: 'admin'|'anggota', id, nama, ... }
-      loginTab: 'anggota', // 'anggota' | 'admin'
       activePage: 'dashboard', // 'dashboard' | 'iuran' | 'transaksi' | 'patungan' | 'pengaturan'
       loading: false,
       data: {
@@ -1100,7 +1099,7 @@ ON CONFLICT (username) DO NOTHING;
     };
 
     function isAdmin() {
-      return State.session && State.session.role === 'admin';
+      return ['admin', 'it_support'].includes(State.session?.role);
     }
 
     function getTarifForYear(tahun) {
@@ -1205,9 +1204,12 @@ ON CONFLICT (username) DO NOTHING;
         const saved = localStorage.getItem(STORAGE_KEYS.SESSION);
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (DB.mode === 'supabase' && parsed.role === 'admin') {
+          if (DB.mode === 'supabase' && ['admin', 'it_support'].includes(parsed.role)) {
             const { data } = await DB.client.auth.getSession();
-            if (data?.session) State.session = parsed;
+            if (data?.session?.user.id === parsed.id && data.session) {
+              const support = data.session.user.app_metadata?.kas_role === 'it_support';
+              State.session = { ...parsed, role: support ? 'it_support' : 'admin' };
+            }
             else localStorage.removeItem(STORAGE_KEYS.SESSION);
           } else {
             State.session = parsed;
@@ -1225,6 +1227,58 @@ ON CONFLICT (username) DO NOTHING;
     /* ============================================================================
        MAIN RENDERER
     ============================================================================ */
+    const tableOrders = new Map();
+    const idCollator = new Intl.Collator('id', { numeric: true, sensitivity: 'base' });
+
+    function installTableSorting(root) {
+      for (const table of root.querySelectorAll('table')) {
+        if (!table.tHead || !table.tBodies.length) continue;
+        const headers = Array.from(table.tHead.rows[0].cells);
+        const key = headers.map(th => th.textContent.trim()).join('|');
+        const body = table.tBodies[0];
+        function applyOrder(column, direction) {
+          headers.forEach((th, i) => th.setAttribute('aria-sort', i !== column ? 'none' : direction === 1 ? 'ascending' : 'descending'));
+          function value(row) {
+            const cell = row.cells[column];
+            const raw = cell.dataset.value ?? cell.textContent.trim();
+            if (/^[+-]?Rp\s*[\d.]+$/.test(raw)) return Number(raw.replace(/[^0-9+-]/g, ''));
+            return raw;
+          }
+          const rows = Array.from(body.rows).filter(row => row.cells.length === headers.length);
+          rows.sort((a, b) => {
+            const left = value(a), right = value(b);
+            return direction * (typeof left === 'number' && typeof right === 'number' ? left - right : idCollator.compare(left, right));
+          });
+          body.append(...rows);
+        }
+        headers.forEach((th, column) => {
+          if (th.textContent.trim() === 'Aksi') return;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = th.textContent.trim();
+          button.title = 'Urutkan berdasarkan ' + button.textContent;
+          button.onclick = () => {
+            const previous = tableOrders.get(key);
+            const direction = previous?.column === column ? -previous.direction : 1;
+            tableOrders.set(key, { column, direction });
+            applyOrder(column, direction);
+          };
+          th.replaceChildren(button);
+        });
+        const order = tableOrders.get(key);
+        if (order) applyOrder(order.column, order.direction);
+      }
+    }
+
+    function updateSearch(input) {
+      const { id, value, selectionStart, selectionEnd } = input;
+      State[id] = value;
+      renderApp();
+      const next = document.getElementById(id);
+      next.focus({ preventScroll: true });
+      next.setSelectionRange(selectionStart, selectionEnd);
+    }
+
     function renderApp() {
       const root = document.getElementById('app-root');
       if (!State.session) {
@@ -1232,6 +1286,7 @@ ON CONFLICT (username) DO NOTHING;
       } else {
         root.innerHTML = renderShell();
       }
+      installTableSorting(root);
       if (window.lucide) lucide.createIcons();
     }
 
@@ -1239,25 +1294,11 @@ ON CONFLICT (username) DO NOTHING;
        1. HALAMAN LOGIN (HYBRID AUTH GLASSMORPHISM)
     ============================================================================ */
     function renderLoginScreen() {
-      const isAnggotaTab = State.loginTab === 'anggota';
       const isDemo = DB.mode === 'demo';
 
       return `
         <div class="w-full h-full overflow-y-auto flex flex-col items-center justify-center p-4 sm:p-6">
           <div class="w-full max-w-md my-auto animate-fade-up">
-            <!-- Mode Status Pill -->
-            <div class="flex justify-center mb-4">
-              <button onclick="openSupabaseConfigModal()" class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition hover:shadow-sm ${
-                isDemo
-                  ? 'bg-amber-50/90 border-amber-200 text-amber-800 hover:bg-amber-100/80'
-                  : 'bg-emerald-50/90 border-emerald-200 text-emerald-800 hover:bg-emerald-100/80'
-              }">
-                <span class="w-2 h-2 rounded-full ${isDemo ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}"></span>
-                <span>${isDemo ? 'Mode Preview Demo (Lokal)' : 'Terhubung ke Supabase Live'}</span>
-                <i data-lucide="settings-2" class="w-3.5 h-3.5 opacity-75"></i>
-              </button>
-            </div>
-
             <!-- Glassmorphism Login Card -->
             <div class="rounded-3xl bg-white/85 backdrop-blur-xl border border-white/80 shadow-float p-6 sm:p-8">
               <!-- Brand Header -->
@@ -1269,45 +1310,21 @@ ON CONFLICT (username) DO NOTHING;
                 <p class="text-sm text-slate-500 mt-1">Transparansi Iuran, Buku Kas & Patungan Ruangan</p>
               </div>
 
-              <!-- Hybrid Tab Switcher -->
-              <div class="grid grid-cols-2 p-1 rounded-2xl bg-slate-100/90 border border-slate-200/70 mb-6">
-                <button
-                  onclick="State.loginTab='anggota'; renderApp();"
-                  class="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
-                    isAnggotaTab
-                      ? 'bg-white text-teal-700 shadow-sm'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }">
-                  <i data-lucide="users" class="w-4 h-4"></i>
-                  <span>Anggota</span>
-                </button>
-                <button
-                  onclick="State.loginTab='admin'; renderApp();"
-                  class="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
-                    !isAnggotaTab
-                      ? 'bg-white text-teal-700 shadow-sm'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }">
-                  <i data-lucide="shield-check" class="w-4 h-4"></i>
-                  <span>Admin / Bendahara</span>
-                </button>
-              </div>
-
               <!-- Form Login -->
               <form onsubmit="handleLoginSubmit(event)" class="space-y-4">
                 <div>
                   <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
-                    ${isAnggotaTab ? 'Username Anggota' : 'Email Admin (Supabase Auth)'}
+                    Username atau email
                   </label>
                   <div class="relative">
-                    <i data-lucide="${isAnggotaTab ? 'user' : 'mail'}" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
+                    <i data-lucide="user" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
                     <input
                       id="login-identifier"
-                      type="${isAnggotaTab ? 'text' : 'email'}"
+                      type="text"
                       required
                       autocomplete="username"
-                      placeholder="${isAnggotaTab ? 'Contoh: atika' : 'bendahara@ipd32.id'}"
-                      value="${isDemo ? (isAnggotaTab ? 'atika' : 'bendahara@ipd32.id') : ''}"
+                      placeholder="Masukkan username atau email"
+                      value="${isDemo ? 'atika' : ''}"
                       class="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-white/90 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25 focus:border-teal-600 transition"
                     />
                   </div>
@@ -1336,7 +1353,7 @@ ON CONFLICT (username) DO NOTHING;
                   id="login-submit-btn"
                   class="w-full py-3 px-4 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-semibold text-sm shadow-sm transition-all active:scale-[0.98] flex items-center justify-center gap-2">
                   <i data-lucide="log-in" class="w-4 h-4"></i>
-                  <span>${isAnggotaTab ? 'Masuk sebagai Anggota (Read-Only)' : 'Masuk sebagai Admin (Full Akses)'}</span>
+                  <span>Masuk</span>
                 </button>
               </form>
 
@@ -1356,16 +1373,7 @@ ON CONFLICT (username) DO NOTHING;
                   : ''
               }
 
-              <div class="mt-6 pt-4 border-t border-slate-200/80 flex items-center justify-between text-xs text-slate-500">
-                <button onclick="openSupabaseConfigModal()" class="inline-flex items-center gap-1.5 font-semibold text-teal-700 hover:text-teal-800">
-                  <i data-lucide="database" class="w-3.5 h-3.5"></i>
-                  <span>Konfigurasi Supabase</span>
-                </button>
-                <button onclick="openSqlGuideModal()" class="inline-flex items-center gap-1.5 font-semibold text-sky-600 hover:text-sky-700">
-                  <i data-lucide="code-2" class="w-3.5 h-3.5"></i>
-                  <span>Salin SQL Tabel</span>
-                </button>
-              </div>
+
             </div>
           </div>
         </div>
@@ -1384,8 +1392,8 @@ ON CONFLICT (username) DO NOTHING;
 
       try {
         const session =
-          State.loginTab === 'admin'
-            ? await DB.loginAdmin(identifier, password)
+          identifier.trim().includes('@')
+            ? await DB.loginAdmin(identifier.trim(), password)
             : await DB.loginAnggota(identifier, password);
 
         State.session = session;
@@ -1600,12 +1608,10 @@ ON CONFLICT (username) DO NOTHING;
       const recap = computeAnnualRecap();
       const activeYr = Number(State.selectedYear);
       const tarifActive = getTarifForYear(activeYr);
-      const activeMembers = State.data.anggota.filter((a) => a.status === 'Aktif');
-      const targetBulanIni = Math.min(12, new Date().getFullYear() === activeYr ? new Date().getMonth() + 1 : 12);
-      const expectedSlots = activeMembers.length * targetBulanIni;
-      const paidSlots = State.data.iuran_kas.filter(
-        (i) => Number(i.tahun) === activeYr && activeMembers.some((m) => m.id === i.anggota_id) && i.bulan <= targetBulanIni && Number(i.nominal) > 0
-      ).length;
+      const activeMembers = State.data.anggota.filter(m => membershipForYear(m, activeYr) === 'Aktif');
+      const summaries = activeMembers.map(m => memberDues(m, activeYr, tarifActive));
+      const expectedSlots = summaries.reduce((sum, months) => sum + months.length, 0);
+      const paidSlots = summaries.reduce((sum, months) => sum + months.filter(m => m.remaining === 0).length, 0);
       const progressPct = expectedSlots > 0 ? Math.min(100, Math.round((paidSlots / expectedSlots) * 100)) : 0;
 
       const recentTx = [...State.data.transaksi_kas]
@@ -1622,8 +1628,9 @@ ON CONFLICT (username) DO NOTHING;
         const myLebih = State.data.saldo_lebih_bayar.find(
           (l) => l.anggota_id === State.session.id && Number(l.tahun) === activeYr
         );
-        const paidMonthNums = new Set(myIuran.map((x) => Number(x.bulan)));
-        const belumBulan = MONTHS.filter((m) => m.num <= targetBulanIni && !paidMonthNums.has(m.num)).map((m) => m.short);
+        const member = activeMembers.find(m => m.id === State.session.id);
+        const due = member ? memberDues(member, activeYr, tarifActive) : [];
+        const belumBulan = due.filter(m => m.remaining > 0);
 
         personalCardHtml = `
           <div class="glass-card rounded-2xl p-5 mb-6 border-l-4 border-l-teal-700 animate-fade-up">
@@ -1635,15 +1642,15 @@ ON CONFLICT (username) DO NOTHING;
                 </div>
                 <h2 class="text-lg font-bold text-slate-900">Halo, ${escapeHtml(State.session.nama)}</h2>
                 <p class="text-sm text-slate-600 mt-0.5">
-                  Tercatat <b>${myIuran.length} dari 12 bulan</b> terbayar (${formatRp(myTotal)})
+                  Setoran tercatat untuk <b>${myIuran.length} bulan</b> (${formatRp(myTotal)})
                   ${myLebih && myLebih.nominal > 0 ? `• Lebih Bayar: <b class="text-emerald-700">${formatRp(myLebih.nominal)}</b>` : ''}.
                 </p>
               </div>
               <div class="flex flex-wrap items-center gap-2">
                 ${
-                  belumBulan.length === 0
-                    ? `<span class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-50 text-emerald-700 text-xs font-bold"><i data-lucide="check-circle-2" class="w-4 h-4"></i>Lunas s.d. Bulan ${MONTHS[targetBulanIni - 1].short}</span>`
-                    : `<span class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-50 text-amber-800 text-xs font-bold"><i data-lucide="clock" class="w-4 h-4"></i>Belum Bayar: ${belumBulan.join(', ')}</span>`
+                  !due.length ? '' : belumBulan.length === 0
+                    ? `<span class="rounded-xl bg-emerald-50 p-2 text-xs font-bold">Lunas s.d. ${due[due.length - 1].short}</span>`
+                    : `<span class="rounded-xl bg-amber-50 p-2 text-xs font-bold">Kurang ${formatRp(belumBulan.reduce((sum, m) => sum + m.remaining, 0))} • ${belumBulan.map(m => m.short).join(', ')}</span>`
                 }
                 <button onclick="navigateTo('iuran')" class="px-3.5 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold transition">
                   Lihat Matriks
@@ -1913,12 +1920,34 @@ ON CONFLICT (username) DO NOTHING;
     /* ============================================================================
        4. PAGE: MATRIKS IURAN KAS 12 BULAN
     ============================================================================ */
+    function membershipForYear(member, year) {
+      const joined = /\b(20\d{2})\b/.exec(member.aktif_sejak || '');
+      if (joined && Number(joined[1]) > year) return null;
+      const years = (member.catatan_status || '').match(/\b20\d{2}\b/g) || [];
+      const left = /\b(?:resign|mutasi|pindah|keluar|tidak aktif setelah)\b[^.;\n]{0,45}?\b(20\d{2})\b/i.exec(member.catatan_status || '');
+      if (member.status !== 'Aktif' && left && years.length === 1) {
+        if (year > Number(left[1])) return null;
+        if (year < Number(left[1])) return 'Aktif';
+      }
+      return member.status;
+    }
+
+    function memberDues(member, year, rate, today = new Date()) {
+      const start = String(member.aktif_sejak || '').toLowerCase();
+      const first = start.includes(String(year)) ? MONTHS.find(m => start.includes(m.full.toLowerCase()))?.num || 1 : 1;
+      const last = year === today.getFullYear() ? today.getMonth() + 1 : year < today.getFullYear() ? 12 : 0;
+      const paid = new Map(State.data.iuran_kas
+        .filter(i => i.anggota_id === member.id && Number(i.tahun) === year)
+        .map(i => [Number(i.bulan), Number(i.nominal)]));
+      return MONTHS.filter(m => m.num >= first && m.num <= last)
+        .map(m => ({ ...m, remaining: Math.max(0, rate - (paid.get(m.num) || 0)) }));
+    }
+
     function renderIuranPage() {
       const years = getAvailableYears();
       const activeYr = Number(State.selectedYear);
       const tarif = getTarifForYear(activeYr);
       const admin = isAdmin();
-      const currentMonthCap = new Date().getFullYear() === activeYr ? new Date().getMonth() + 1 : 12;
 
       // Index pembayaran untuk pencarian cepat O(1)
       const iuranMap = {};
@@ -1937,26 +1966,27 @@ ON CONFLICT (username) DO NOTHING;
 
       // Filter anggota
       const searchQ = State.iuranSearch.trim().toLowerCase();
-      const rows = State.data.anggota
+      const eligible = State.data.anggota
+        .map(member => ({ ...member, status: membershipForYear(member, activeYr) }))
+        .filter(member => member.status)
         .map((m) => {
-          let paidCount = 0;
+          const due = memberDues(m, activeYr, tarif);
           let totalBayar = 0;
           for (let b = 1; b <= 12; b++) {
             const cell = iuranMap[`${m.id}_${b}`];
             if (cell && Number(cell.nominal) > 0) {
-              paidCount++;
               totalBayar += Number(cell.nominal);
             }
           }
           const lebihObj = lebihMap[m.id];
           const lebihNominal = lebihObj ? Number(lebihObj.nominal) : 0;
-          const isLunasCap = m.status === 'Aktif' && paidCount >= currentMonthCap;
           const derivedStatus =
-            m.status !== 'Aktif' ? m.status : isLunasCap ? 'Lunas' : 'Kurang Bayar';
+            m.status !== 'Aktif' ? m.status : !due.length ? 'Belum jatuh tempo' :
+            due.some(month => month.remaining > 0) ? 'Kurang Bayar' : 'Lunas';
 
-          return { member: m, paidCount, totalBayar, lebihNominal, lebihObj, derivedStatus };
-        })
-        .filter((r) => {
+          return { member: m, totalBayar, lebihNominal, lebihObj, derivedStatus };
+        });
+      const rows = eligible.filter((r) => {
           if (searchQ && !r.member.nama.toLowerCase().includes(searchQ)) return false;
           if (State.iuranStatusFilter === 'Semua') return true;
           if (State.iuranStatusFilter === 'Aktif') return r.member.status === 'Aktif';
@@ -1997,6 +2027,7 @@ ON CONFLICT (username) DO NOTHING;
               </p>
             </div>
             <div class="flex flex-wrap items-center gap-2">
+              <button onclick="printIuran()" class="px-3.5 py-2 rounded-xl bg-white border text-xs font-semibold">Cetak / Simpan PDF</button>
               <button onclick="exportIuranCsv()" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition">
                 <i data-lucide="download" class="w-3.5 h-3.5"></i>
                 <span>Ekspor CSV</span>
@@ -2014,6 +2045,12 @@ ON CONFLICT (username) DO NOTHING;
             </div>
           </div>
 
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            ${[['Total anggota', eligible.length], ['Lunas', eligible.filter(r => r.derivedStatus === 'Lunas').length],
+              ['Kurang bayar', eligible.filter(r => r.derivedStatus === 'Kurang Bayar').length],
+              ['Nonaktif', eligible.filter(r => r.member.status !== 'Aktif').length]].map(([label, value]) =>
+              `<div class="glass-card rounded-xl p-3"><p class="text-xs text-slate-500">${label}</p><strong>${value}</strong></div>`).join('')}
+          </div>
           <!-- Top Action & Filter Bar -->
           <div class="glass-card rounded-2xl p-3.5 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
             <div class="flex flex-wrap items-center gap-2">
@@ -2052,7 +2089,7 @@ ON CONFLICT (username) DO NOTHING;
               <input
                 type="text"
                 value="${escapeHtml(State.iuranSearch)}"
-                oninput="State.iuranSearch=this.value; renderApp();"
+                id="iuranSearch" oninput="updateSearch(this)"
                 placeholder="Cari nama anggota..."
                 class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25"
               />
@@ -2062,7 +2099,7 @@ ON CONFLICT (username) DO NOTHING;
           <!-- 12-Month Matrix Table -->
           <div class="glass-card rounded-2xl overflow-hidden">
             <div class="overflow-x-auto">
-              <table class="w-full text-left border-collapse min-w-[1120px]">
+              <table id="matrix" class="w-full text-left border-collapse min-w-[1120px]">
                 <thead>
                   <tr class="bg-slate-50/95 border-b border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">
                     <th class="sticky left-0 z-20 bg-slate-50 py-3 px-3 w-10 text-center">No</th>
@@ -2081,7 +2118,7 @@ ON CONFLICT (username) DO NOTHING;
                           .map((r, idx) => {
                             const isSelf = !admin && State.session?.id === r.member.id;
                             return `
-                              <tr class="${isSelf ? 'bg-teal-50/40' : 'hover:bg-slate-50/70'} transition">
+                              <tr data-member="${escapeHtml(r.member.id)}" data-status="${escapeHtml(r.member.status)}" class="${isSelf ? 'bg-teal-50/40' : 'hover:bg-slate-50/70'} transition">
                                 <td class="sticky left-0 z-10 ${isSelf ? 'bg-teal-50/95' : 'bg-white'} py-2.5 px-3 text-center font-semibold text-slate-400 tabular-nums">
                                   ${idx + 1}
                                 </td>
@@ -2102,25 +2139,26 @@ ON CONFLICT (username) DO NOTHING;
                                   const nominal = cell ? Number(cell.nominal) : 0;
                                   const isAnomaly = nominal > 0 && nominal > tarif * 2;
                                   const clickable = admin
-                                    ? `onclick="openIuranCellModal('${r.member.id}', ${activeYr}, ${m.num})" class="cursor-pointer hover:ring-2 hover:ring-teal-500/40"`
+                                    ? `onclick="openIuranCellModal('${r.member.id}', ${activeYr}, ${m.num})"`
                                     : '';
                                   if (nominal > 0) {
                                     return `
-                                      <td class="py-2 px-1 text-center">
+                                      <td data-value="${nominal}" class="py-2 px-1 text-center">
                                         <div ${clickable} title="${
                                           isAnomaly ? 'Perhatian: Nominal melebihi 2x tarif bulanan!' : formatRp(nominal)
                                         }" class="mx-auto py-1.5 px-1 rounded-lg font-bold tabular-nums text-[11px] transition ${
-                                          isAnomaly
+                                          isAnomaly || nominal < tarif
                                             ? 'bg-amber-100 text-amber-800 border border-amber-300'
                                             : 'bg-emerald-50 text-emerald-700 border border-emerald-200/70'
                                         }">
                                           ${Math.round(nominal / 1000)}k
+                                          ${nominal < tarif ? `<small class="block">Kurang ${formatRp(tarif - nominal)}</small>` : ''}
                                         </div>
                                       </td>
                                     `;
                                   }
                                   return `
-                                    <td class="py-2 px-1 text-center">
+                                    <td data-value="${nominal}" class="py-2 px-1 text-center">
                                       <div ${clickable} class="mx-auto py-1.5 px-1 rounded-lg text-[11px] text-slate-300 border border-dashed border-slate-200/80 ${
                                         admin ? 'hover:bg-slate-100 hover:text-slate-500' : ''
                                       }">
@@ -2158,7 +2196,7 @@ ON CONFLICT (username) DO NOTHING;
                     <td class="sticky left-0 z-10 bg-slate-100 py-3 px-3"></td>
                     <td class="sticky left-10 z-10 bg-slate-100 py-3 px-3 sticky-col-shadow">TOTAL (${rows.length} org)</td>
                     ${MONTHS.map(
-                      (m) => `<td class="py-3 px-1 text-center tabular-nums text-teal-800">${monthTotals[m.num] > 0 ? Math.round(monthTotals[m.num] / 1000) + 'k' : '0'}</td>`
+                      (m) => `<td data-value="${monthTotals[m.num]}" class="py-3 px-1 text-center tabular-nums text-teal-800">${monthTotals[m.num] > 0 ? Math.round(monthTotals[m.num] / 1000) + 'k' : '0'}</td>`
                     ).join('')}
                     <td class="py-3 px-3 text-right tabular-nums text-emerald-700">${formatRp(grandIuran)}</td>
                     <td class="py-3 px-3 text-right tabular-nums text-sky-700">${formatRp(grandLebih)}</td>
@@ -2320,6 +2358,36 @@ ON CONFLICT (username) DO NOTHING;
       }
     }
 
+    function printIuran() {
+      const preview = window.open('', '_blank');
+      if (!preview) return showToast('Izinkan jendela cetak untuk menyimpan PDF.', 'error');
+      const doc = preview.document;
+      doc.documentElement.lang = 'id';
+      doc.title = 'Matriks Iuran Kas ' + State.selectedYear;
+      const heading = doc.createElement('h1');
+      heading.textContent = doc.title;
+      const table = doc.createElement('table');
+      for (const section of document.getElementById('matrix').children) {
+        const target = doc.createElement(section.localName);
+        for (const source of section.rows) {
+          const row = target.insertRow();
+          for (const cell of source.cells) {
+            const copy = doc.createElement(cell.localName);
+            copy.colSpan = cell.colSpan;
+            copy.textContent = cell.hasAttribute('data-value') ? formatRp(cell.dataset.value) : cell.innerText.trim();
+            row.append(copy);
+          }
+        }
+        table.append(target);
+      }
+      const style = doc.createElement('style');
+      style.textContent = '@page{size:A4 landscape;margin:8mm}body{font:9px Arial}table{width:100%;border-collapse:collapse}td,th{padding:3px;border:1px solid #aaa}tr{break-inside:avoid}tfoot{display:table-row-group}';
+      doc.head.append(style);
+      doc.body.append(heading, table);
+      preview.focus();
+      preview.print();
+    }
+
     function exportIuranCsv() {
       const yr = Number(State.selectedYear);
       const iuranMap = {};
@@ -2329,7 +2397,8 @@ ON CONFLICT (username) DO NOTHING;
 
       const headers = ['No', 'Nama', 'Peran', 'Status', ...MONTHS.map((m) => m.short), 'Total Iuran', 'Lebih Bayar'];
       const lines = [headers.join(',')];
-      State.data.anggota.forEach((m, idx) => {
+      Array.from(document.querySelectorAll('#matrix tbody tr[data-member]')).forEach((row, idx) => {
+        const m = State.data.anggota.find(member => member.id === row.dataset.member);
         let tot = 0;
         const mCols = MONTHS.map((mo) => {
           const v = Number(iuranMap[`${m.id}_${mo.num}`]) || 0;
@@ -2337,7 +2406,7 @@ ON CONFLICT (username) DO NOTHING;
           return v;
         });
         const lb = Number(lebihMap[m.id]) || 0;
-        lines.push([idx + 1, `"${m.nama.replace(/"/g, '""')}"`, m.peran, m.status, ...mCols, tot, lb].join(','));
+        lines.push([idx + 1, `"${m.nama.replace(/"/g, '""')}"`, m.peran, row.dataset.status, ...mCols, tot, lb].join(','));
       });
 
       const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
@@ -2437,7 +2506,7 @@ ON CONFLICT (username) DO NOTHING;
               <input
                 type="text"
                 value="${escapeHtml(State.txSearch)}"
-                oninput="State.txSearch=this.value; renderApp();"
+                id="txSearch" oninput="updateSearch(this)"
                 placeholder="Cari kategori / deskripsi..."
                 class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-600/25"
               />
@@ -2466,7 +2535,7 @@ ON CONFLICT (username) DO NOTHING;
                             const isIn = tx.tipe === 'masuk_lain';
                             return `
                               <tr class="hover:bg-slate-50/70 transition">
-                                <td class="py-3.5 px-4 whitespace-nowrap text-xs font-semibold text-slate-600 tabular-nums">
+                                <td data-value="${escapeHtml(tx.tanggal)}" class="py-3.5 px-4 whitespace-nowrap text-xs font-semibold text-slate-600 tabular-nums">
                                   ${formatDateId(tx.tanggal)}
                                 </td>
                                 <td class="py-3.5 px-4 whitespace-nowrap">
@@ -3253,7 +3322,7 @@ ON CONFLICT (username) DO NOTHING;
             ${[
               { id: 'anggota', label: 'Master Anggota', icon: 'users' },
               { id: 'periode', label: 'Periode & Tarif Kas', icon: 'calendar-range' },
-              { id: 'supabase', label: 'Supabase & Skrip SQL', icon: 'database' },
+              ...(State.session.role === 'it_support' ? [{ id: 'supabase', label: 'Sistem & Backup', icon: 'database' }] : []),
             ]
               .map(
                 (t) => `
@@ -3273,7 +3342,7 @@ ON CONFLICT (username) DO NOTHING;
               ? renderTabAnggota()
               : tab === 'periode'
               ? renderTabPeriode()
-              : renderTabSupabase()
+              : State.session.role === 'it_support' ? renderTabSupabase() : renderTabAnggota()
           }
         </div>
       `;
@@ -3290,7 +3359,7 @@ ON CONFLICT (username) DO NOTHING;
           <div class="p-4 sm:p-5 border-b border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div class="relative sm:w-72">
               <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-              <input type="text" value="${escapeHtml(State.memberSearch)}" oninput="State.memberSearch=this.value; renderApp();"
+              <input type="text" value="${escapeHtml(State.memberSearch)}" id="memberSearch" oninput="updateSearch(this)"
                 placeholder="Cari nama atau username..."
                 class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
             </div>
@@ -3548,154 +3617,17 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function renderTabSupabase() {
-      const isDemo = DB.mode === 'demo';
-      return `
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <!-- Koneksi Supabase -->
-          <div class="glass-card rounded-2xl p-5 space-y-4">
-            <div class="flex items-center justify-between">
-              <h2 class="text-base font-bold text-slate-900">Koneksi Supabase</h2>
-              <span class="px-2.5 py-1 rounded-full text-xs font-bold ${
-                isDemo ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'
-              }">${isDemo ? 'Mode Demo Lokal' : 'Supabase Live'}</span>
-            </div>
-            <p class="text-xs text-slate-500 leading-relaxed">
-              Masukkan <b>Project URL</b> dan <b>Anon Public Key</b> dari Supabase Dashboard → Project Settings → API. Kosongkan keduanya untuk kembali ke Mode Demo.
-            </p>
-            <form onsubmit="saveSupabaseConfig(event)" class="space-y-3">
-              <div>
-                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Supabase Project URL</label>
-                <input id="sb-url-input" type="url" value="${escapeHtml(DB.url)}" placeholder="https://xxxx.supabase.co"
-                  class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono" />
-              </div>
-              <div>
-                <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Supabase Anon Public Key</label>
-                <input id="sb-key-input" type="text" value="${escapeHtml(DB.key)}" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
-                  class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono" />
-              </div>
-              <div class="flex flex-wrap gap-2 pt-2">
-                <button type="submit" class="px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm">
-                  Simpan & Hubungkan
-                </button>
-                <button type="button" onclick="exportBackupJson()" class="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold">
-                  Unduh Backup JSON
-                </button>
-                ${
-                  isDemo
-                    ? `<button type="button" onclick="confirmResetDemo()" class="px-4 py-2.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold">Reset Data Demo</button>`
-                    : ''
-                }
-              </div>
-            </form>
-          </div>
-
-          <!-- Skrip SQL Migrasi -->
-          <div class="glass-card rounded-2xl p-5 flex flex-col">
-            <div class="flex items-center justify-between gap-2 mb-3">
-              <div>
-                <h2 class="text-base font-bold text-slate-900">Skrip SQL Setup Tabel</h2>
-                <p class="text-xs text-slate-500 mt-0.5">Salin dan jalankan di Supabase SQL Editor</p>
-              </div>
-              <button onclick="copyTextToClipboard(SUPABASE_SQL_SCRIPT, 'Skrip SQL berhasil disalin!')" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shadow-sm">
-                <i data-lucide="copy" class="w-3.5 h-3.5"></i>
-                <span>Salin SQL</span>
-              </button>
-            </div>
-            <pre class="flex-1 max-h-72 overflow-auto p-3.5 rounded-xl bg-slate-900 text-slate-100 text-[11px] font-mono leading-relaxed select-all">${escapeHtml(SUPABASE_SQL_SCRIPT)}</pre>
-          </div>
-        </div>
-      `;
-    }
-
-    function openSupabaseConfigModal() {
-      openModal(`
-        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
-          <h3 class="text-base font-bold text-slate-900">Konfigurasi Koneksi Supabase</h3>
-          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
-        </div>
-        <form onsubmit="saveSupabaseConfig(event, true)" class="p-5 space-y-4">
-          <p class="text-xs text-slate-600 leading-relaxed">
-            Hubungkan ke proyek Supabase Anda untuk penyimpanan cloud & login Admin via Supabase Auth. Kosongkan untuk menggunakan Mode Demo Lokal.
-          </p>
-          <div>
-            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Supabase Project URL</label>
-            <input id="sb-url-input" type="url" value="${escapeHtml(DB.url)}" placeholder="https://xxxx.supabase.co"
-              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono" />
-          </div>
-          <div>
-            <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Supabase Anon Public Key</label>
-            <input id="sb-key-input" type="text" value="${escapeHtml(DB.key)}" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
-              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-mono" />
-          </div>
-          <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
-            <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Tutup</button>
-            <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan & Terapkan</button>
-          </div>
-        </form>
-      `, 'max-w-md');
-    }
-
-    function openSqlGuideModal() {
-      openModal(`
-        <div class="p-5 border-b border-slate-200 flex items-center justify-between">
-          <div>
-            <h3 class="text-base font-bold text-slate-900">Skrip SQL Setup Supabase (7 Tabel + RLS)</h3>
-            <p class="text-xs text-slate-500 mt-0.5">Buka Supabase Dashboard → SQL Editor → Paste → Run</p>
-          </div>
-          <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
-        </div>
-        <div class="p-5 overflow-y-auto space-y-3">
-          <div class="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900">
-            <b>Langkah Admin:</b> Setelah menjalankan SQL ini, buat 1 akun Admin di menu <b>Supabase → Authentication → Users → Add User</b> (Email & Password). Anggota cukup didaftarkan di tabel <code>anggota</code>.
-          </div>
-          <pre class="max-h-80 overflow-auto p-3.5 rounded-xl bg-slate-900 text-slate-100 text-[11px] font-mono leading-relaxed select-all">${escapeHtml(SUPABASE_SQL_SCRIPT)}</pre>
-          <div class="flex justify-end gap-2 pt-2">
-            <button onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Tutup</button>
-            <button onclick="copyTextToClipboard(SUPABASE_SQL_SCRIPT, 'Skrip SQL berhasil disalin!')" class="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">
-              <i data-lucide="copy" class="w-3.5 h-3.5"></i>
-              <span>Salin Semua SQL</span>
-            </button>
-          </div>
-        </div>
-      `, 'max-w-2xl');
-    }
-
-    async function saveSupabaseConfig(e, fromModal = false) {
-      e.preventDefault();
-      const url = (document.getElementById('sb-url-input')?.value || '').trim();
-      const key = (document.getElementById('sb-key-input')?.value || '').trim();
-
-      localStorage.setItem(STORAGE_KEYS.SB_URL, url);
-      localStorage.setItem(STORAGE_KEYS.SB_KEY, key);
-      localStorage.removeItem(STORAGE_KEYS.SESSION);
-      State.session = null;
-
-      DB.init();
-      if (fromModal) closeModal();
-      showToast(
-        DB.mode === 'supabase'
-          ? 'Konfigurasi Supabase disimpan! Silakan login kembali.'
-          : 'Beralih ke Mode Preview Demo Lokal.',
-        'success'
-      );
-      renderApp();
-    }
-
-    function confirmResetDemo() {
-      openConfirmModal({
-        title: 'Reset Data Demo?',
-        message: 'Seluruh perubahan di Mode Demo Lokal akan dikembalikan ke data awal contoh IPD 32.',
-        confirmLabel: 'Reset Data',
-        danger: true,
-        onConfirm: async () => {
-          DB.resetDemoStore();
-          showToast('Data demo berhasil direset.', 'info');
-          await refreshData();
-        },
-      });
+      if (State.session?.role !== 'it_support') return '';
+      return `<section class="glass-card rounded-2xl p-5 space-y-4">
+        <h2 class="font-bold">Sistem &amp; Backup</h2>
+        <p>Lingkungan: ${DB.mode === 'demo' ? 'DEMO' : isProduction ? 'PROD' : 'DEV'}</p>
+        <button class="btn px-3 py-2 border rounded-xl" onclick="exportBackupJson()">Unduh backup JSON</button>
+        <button class="btn px-3 py-2 border rounded-xl" onclick="copyTextToClipboard(SUPABASE_SQL_SCRIPT, 'SQL disalin')">Salin skrip SQL</button>
+      </section>`;
     }
 
     function exportBackupJson() {
+      if (State.session?.role !== 'it_support') return;
       const blob = new Blob([JSON.stringify(State.data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');

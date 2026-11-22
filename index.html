@@ -1550,6 +1550,7 @@ ON CONFLICT (username) DO NOTHING;
         onConfirm: async () => {
           await DB.logout();
           State.session = null;
+          resetAuditView();
           State.activePatunganId = null;
           showToast('Anda telah keluar.', 'info');
           renderApp();
@@ -1576,6 +1577,7 @@ ON CONFLICT (username) DO NOTHING;
 
     function navigateTo(pageId) {
       State.activePage = pageId;
+      if (pageId==='pengaturan' && State.settingsTab==='log' && isAdmin()) { loadAuditPage(); return; }
       if (pageId !== 'patungan') State.activePatunganId = null;
       renderApp();
       const scroller = document.getElementById('main-scroll-area');
@@ -3599,6 +3601,73 @@ ON CONFLICT (username) DO NOTHING;
       };
     }
 
+    const auditLabels = {
+      anggota:'Master anggota', periode_kas:'Periode dan tarif', iuran_kas:'Iuran',
+      saldo_lebih_bayar:'Lebih bayar', transaksi_kas:'Buku Kas', patungan_event:'Acara', patungan_peserta:'Peserta patungan'
+    };
+    const auditView = { rows:[], loading:false, error:'', older:false, cursors:[null], request:0 };
+    function resetAuditView() {
+      Object.assign(auditView,{rows:[],loading:false,error:'',older:false,cursors:[null],request:auditView.request+1});
+    }
+
+    async function loadAuditPage(direction='latest') {
+      if(!isAdmin())return;
+      const state=auditView;
+      if(direction==='latest')resetAuditView();
+      if(state.loading)return;
+      const cursors=state.cursors.slice();
+      if(direction==='older' && state.older)cursors.push(state.rows.at(-1).id);
+      if(direction==='newer' && cursors.length>1)cursors.pop();
+      const request=++state.request;
+      state.loading=true;state.error='';renderApp();
+      try{
+        let rows=[];
+        if(DB.mode==='supabase'){
+          const {data,error}=await DB.client.rpc('baca_log_kas',{p_sebelum:cursors.at(-1)});
+          if(error)throw error;
+          rows=data;
+        }
+        if(request===state.request){
+          state.rows=rows.slice(0,50);state.older=rows.length>50;state.cursors=cursors;
+        }
+      }catch(err){
+        if(request===state.request)state.error=err.message||'Gagal memuat log.';
+      }finally{
+        if(request===state.request){
+          state.loading=false;
+          if(isAdmin() && State.activePage==='pengaturan' && State.settingsTab==='log')renderApp();
+        }
+      }
+    }
+
+    function renderAuditTab() {
+      if(!isAdmin())return '';
+      const {rows,loading,error,older,cursors}=auditView;
+      const formatValue=(key,value)=>{
+        if(value==null)return '—';
+        if(['tarif_bulanan','nominal','tarif_default','total_pengeluaran','subsidi_kas','tarif_target','nominal_bayar'].includes(key))return formatRp(value);
+        if(typeof value==='boolean')return value?'Ya':'Tidak';
+        return escapeHtml(String(value));
+      };
+      const records=rows.map(row=>{
+        const diffs=Object.entries(row.perubahan||{}).map(([key,values])=>{
+          const label=escapeHtml(key.replaceAll('_',' '));
+          const detail=Array.isArray(values)?values.map(v=>formatValue(key,v)).join(' → '):escapeHtml(String(values));
+          return `<li><b>${label}</b> ${detail}</li>`;
+        }).join('');
+        const aksi={INSERT:'Tambah',UPDATE:'Ubah',DELETE:'Hapus'}[row.aksi]||'Perubahan';
+        return `<tr><td class="p-3 whitespace-nowrap">${new Date(row.waktu).toLocaleString('id-ID',{timeZone:'Asia/Jakarta'})}</td><td class="p-3">${escapeHtml(row.aktor)}</td><td class="p-3"><b>${aksi}</b> · ${escapeHtml(auditLabels[row.tabel]||row.tabel)}<br>${escapeHtml(row.objek)}</td><td class="p-3">${diffs?`<details><summary class="cursor-pointer text-teal-700">Lihat perubahan</summary><ul>${diffs}</ul></details>`:'Data diperbarui'}</td></tr>`;
+      }).join('');
+      let message='';
+      if(loading)message='Memuat aktivitas…';
+      else if(error)message=error;
+      else if(DB.mode==='demo')message='Log database tersedia saat terhubung ke Supabase.';
+      else if(!rows.length)message='Belum ada perubahan sejak pencatatan diaktifkan.';
+      return `<section class="glass-card rounded-2xl overflow-hidden"><header class="p-4 flex justify-between items-center gap-3"><div><h2 class="font-bold">Log Aktivitas</h2><p class="text-xs text-slate-500">Perubahan data kas · Waktu Indonesia Barat</p></div><button class="border rounded-xl px-3 py-2 text-xs" onclick="loadAuditPage()">Muat terbaru</button></header>
+        ${message?`<p class="p-4 text-sm" role="status">${escapeHtml(message)}</p>`:`<div class="overflow-x-auto"><table class="w-full min-w-[640px] text-left text-sm"><thead class="bg-teal-50"><tr>${['Waktu (WIB)','Pelaku','Aktivitas','Detail'].map(x=>`<th class="p-3">${x}</th>`).join('')}</tr></thead><tbody class="divide-y">${records}</tbody></table></div>`}
+        ${!loading && !error && (older||cursors.length>1)?`<footer class="flex justify-between p-4 text-sm"><button ${cursors.length===1?'disabled':''} onclick="loadAuditPage('newer')">Lebih baru</button><button ${!older?'disabled':''} onclick="loadAuditPage('older')">Lebih lama</button></footer>`:''}</section>`;
+    }
+
     function renderPengaturanPage() {
       if (!isAdmin()) {
         return `<div class="glass-card rounded-2xl p-10 text-center text-sm text-slate-500">Halaman ini khusus untuk Admin / Bendahara IPD 32.</div>`;
@@ -3617,11 +3686,12 @@ ON CONFLICT (username) DO NOTHING;
             ${[
               { id: 'anggota', label: 'Master Anggota', icon: 'users' },
               { id: 'periode', label: 'Periode & Tarif Kas', icon: 'calendar-range' },
+              { id: 'log', label: 'Log Aktivitas', icon: 'history' },
               ...(State.session.role === 'it_support' ? [{ id: 'supabase', label: 'Sistem & Backup', icon: 'database' }] : []),
             ]
               .map(
                 (t) => `
-              <button onclick="State.settingsTab='${t.id}'; renderApp();" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition ${
+              <button onclick="State.settingsTab='${t.id}'; if(State.settingsTab==='log') loadAuditPage(); else renderApp();" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition ${
                 tab === t.id ? 'bg-teal-700 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
               }">
                 <i data-lucide="${t.icon}" class="w-4 h-4"></i>
@@ -3637,6 +3707,7 @@ ON CONFLICT (username) DO NOTHING;
               ? renderTabAnggota()
               : tab === 'periode'
               ? renderTabPeriode()
+              : tab === 'log' ? renderAuditTab()
               : State.session.role === 'it_support' ? renderTabSupabase() : renderTabAnggota()
           }
         </div>

@@ -1085,6 +1085,7 @@ ON CONFLICT (username) DO NOTHING;
       },
       // Filters
       selectedYear: 2026,
+      reportMonth: 0,
       iuranSearch: '',
       iuranStatusFilter: 'Semua',
       txYearFilter: '2026',
@@ -1434,6 +1435,7 @@ ON CONFLICT (username) DO NOTHING;
         { id: 'patungan', label: 'Patungan & Acara', short: 'Patungan', icon: 'heart-handshake' },
       ];
       if (isAdmin()) {
+        items.push({ id: 'laporan', label: 'Laporan Anggota', short: 'Laporan', icon: 'file-text' });
         items.push({ id: 'pengaturan', label: 'Anggota & Sistem', short: 'Kelola', icon: 'settings' });
       }
       return items;
@@ -1456,6 +1458,7 @@ ON CONFLICT (username) DO NOTHING;
         iuran: 'Matriks Iuran Kas 12 Bulan',
         transaksi: 'Pemasukan Lain & Pengeluaran',
         patungan: 'Patungan & Acara Ruangan',
+        laporan: 'Laporan Anggota',
         pengaturan: 'Anggota, Periode & Supabase',
       };
 
@@ -1560,6 +1563,8 @@ ON CONFLICT (username) DO NOTHING;
                   ? renderTransaksiPage()
                   : State.activePage === 'patungan'
                   ? renderPatunganPage()
+                  : State.activePage === 'laporan'
+                  ? renderReportPage()
                   : renderPengaturanPage()
               }
             </div>
@@ -1567,7 +1572,7 @@ ON CONFLICT (username) DO NOTHING;
 
           <!-- MOBILE FLOATING BOTTOM NAVIGATION BAR (< 1024px) -->
           <nav class="lg:hidden fixed bottom-3 left-3 right-3 z-40 rounded-2xl bg-white/90 backdrop-blur-xl border border-slate-200/80 shadow-float px-2 py-1.5">
-            <div class="grid ${navItems.length === 5 ? 'grid-cols-5' : 'grid-cols-4'} gap-1">
+            <div class="grid ${navItems.length === 6 ? 'grid-cols-6' : 'grid-cols-4'} gap-1">
               ${navItems
                 .map((item) => {
                   const active = State.activePage === item.id;
@@ -1941,6 +1946,70 @@ ON CONFLICT (username) DO NOTHING;
         .map(i => [Number(i.bulan), Number(i.nominal)]));
       return MONTHS.filter(m => m.num >= first && m.num <= last)
         .map(m => ({ ...m, remaining: Math.max(0, rate - (paid.get(m.num) || 0)) }));
+    }
+
+    function reportTable(title, headers, rows, empty = '') {
+      const cells = rows.map(row => `<tr>${row.map((v,i) => `<td class="border-b px-3 py-2 ${i ? 'text-right' : ''}">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('');
+      return `<section><h3 class="font-bold my-3">${title}</h3>${rows.length
+        ? `<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr>${headers.map((h,i) => `<th class="bg-slate-50 px-3 py-2 ${i ? 'text-right' : 'text-left'}">${h}</th>`).join('')}</tr></thead><tbody>${cells}</tbody></table></div>`
+        : `<p>${empty}</p>`}</section>`;
+    }
+
+    function renderReportPage() {
+      if (!isAdmin()) return '';
+      const year = Number(State.selectedYear);
+      const month = State.reportMonth;
+      const annual = computeAnnualRecap().rows.find(r => r.tahun === year);
+      if (!annual || !State.data.periode_kas.length) return '<p>Data periode kas belum tersedia.</p>';
+      const total = records => records.reduce((sum, r) => sum + Number(r.nominal || 0), 0);
+      const tx = State.data.transaksi_kas.filter(r => Number(r.tahun) === year);
+      const dues = State.data.iuran_kas.filter(r => Number(r.tahun) === year);
+      const months = MONTHS.map(m => {
+        const entries = tx.filter(r => Number(r.bulan) === m.num);
+        const iuran = total(dues.filter(r => Number(r.bulan) === m.num));
+        const other = total(entries.filter(r => r.tipe === 'masuk_lain'));
+        const spent = total(entries.filter(r => r.tipe === 'keluar'));
+        return { ...m, iuran, other, spent, net: iuran + other - spent };
+      });
+      const selected = month ? [months[month - 1]] : months;
+      const opening = annual.saldoKumulatif - annual.saldoTahun + months.filter(m => m.num < month).reduce((s,m) => s + m.net, 0);
+      const income = selected.reduce((s,m) => s + m.iuran + m.other, month ? 0 : annual.totalLebihBayar);
+      const spent = selected.reduce((s,m) => s + m.spent, 0);
+      const summary = [['Saldo awal',opening],['Pemasukan',income],['Pengeluaran',spent],['Saldo akhir',opening+income-spent]];
+      const categories = new Map();
+      for (const row of tx.filter(r => r.tipe === 'keluar' && (!month || Number(r.bulan) === month))) {
+        const key = row.kategori || 'Lainnya';
+        categories.set(key, (categories.get(key) || 0) + Number(row.nominal));
+      }
+      const events = State.data.patungan_event.filter(e => Number(e.tahun) === year);
+      return `<div class="space-y-4"><div class="flex flex-wrap items-end gap-3">
+        <label>Tahun <select class="border rounded p-2" onchange="State.selectedYear=Number(this.value);renderApp()">${getAvailableYears().map(y => `<option ${year===y?'selected':''}>${y}</option>`).join('')}</select></label>
+        <label>Periode <select class="border rounded p-2" onchange="State.reportMonth=Number(this.value);renderApp()"><option value="0">Tahunan</option>${MONTHS.map(m=>`<option value="${m.num}" ${month===m.num?'selected':''}>${m.full}</option>`).join('')}</select></label>
+        <button class="bg-teal-700 text-white rounded px-4 py-2" onclick="printMemberReport()">Cetak / Simpan PDF</button></div>
+        <article id="member-report" class="glass-card rounded-2xl p-5 space-y-5">
+        <header><h2 class="text-xl font-bold">Laporan Kas IPD 32</h2><p>${month ? MONTHS[month-1].full : 'Tahun'} ${year} · Disusun ${new Date().toLocaleDateString('id-ID')}</p></header>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">${summary.map(([label,v])=>`<div class="bg-slate-50 rounded p-3"><p>${label}</p><strong>${formatRp(v)}</strong></div>`).join('')}</div>
+        ${reportTable('Arus kas', ['Bulan','Iuran','Masuk lain','Keluar','Selisih'],selected.map(m=>[m.full,...[m.iuran,m.other,m.spent,m.net].map(v=>formatRp(v))]))}
+        <p class="text-sm">${month ? 'Saldo bulanan mencakup transaksi yang memiliki bulan. Lebih bayar tahun berjalan ditambahkan pada rekap tahunan.' : `Lebih bayar tahunan ${formatRp(annual.totalLebihBayar)} sudah termasuk dalam pemasukan dan saldo akhir.`}</p>
+        ${reportTable('Penggunaan dana', ['Kategori','Jumlah'], [...categories].sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k,formatRp(v)]),'Belum ada pengeluaran tercatat pada periode ini.')}
+        ${month ? '' : reportTable('Patungan acara', ['Acara','Terkumpul','Biaya','Selisih'],events.map(e=>{const stats=computePatunganStats(e.id);return [e.nama_event,formatRp(stats.terkumpul),formatRp(stats.pengeluaran),formatRp(stats.selisih)];}),'Belum ada acara tercatat pada tahun ini.')}
+        ${!month && events.length ? '<p class="text-sm">Dampak patungan pada saldo mengikuti transaksi yang tercatat di Buku Kas.</p>' : ''}</article></div>`;
+    }
+
+    function printMemberReport() {
+      const report = document.getElementById('member-report');
+      if (!isAdmin() || !report) return;
+      const preview = window.open('', '_blank');
+      if (!preview) return showToast('Izinkan jendela cetak untuk menyimpan PDF.', 'error');
+      const doc = preview.document;
+      doc.title = `Laporan Kas IPD 32 - ${State.reportMonth ? MONTHS[State.reportMonth - 1].full : 'Tahunan'} ${State.selectedYear}`;
+      doc.documentElement.lang = 'id';
+      const style = doc.createElement('style');
+      style.textContent = '@page{size:A4;margin:14mm}body{font:11pt Arial;color:#173536}h2,h3{break-after:avoid}article>.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}table{width:100%;border-collapse:collapse}th,td{padding:5px;border-bottom:1px solid #ccc;text-align:right}th:first-child,td:first-child{text-align:left}th button{all:unset}tr{break-inside:avoid}p{margin:8px 0}';
+      doc.head.append(style);
+      doc.body.append(doc.importNode(report,true));
+      preview.focus();
+      preview.print();
     }
 
     function renderIuranPage() {

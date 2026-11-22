@@ -1476,8 +1476,11 @@ ON CONFLICT (username) DO NOTHING;
                       autocomplete="current-password"
                       placeholder="Masukkan password"
                       value="${isDemo ? '123' : ''}"
-                      class="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-white/90 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25 focus:border-teal-600 transition"
+                      class="w-full pl-10 pr-12 py-3 rounded-xl border border-slate-200 bg-white/90 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25 focus:border-teal-600 transition"
                     />
+                    <button id="password-visibility" type="button" aria-controls="login-password" aria-label="Tampilkan kata sandi" title="Tampilkan kata sandi" onclick="togglePasswordVisibility(this)" class="absolute inset-y-0 right-1 w-10 flex items-center justify-center rounded-xl text-slate-600 hover:text-teal-700 focus-visible:ring-2 focus-visible:ring-teal-600">
+                      <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/><path class="hidden" data-slash d="M3 3l18 18"/></svg>
+                    </button>
                   </div>
                 </div>
 
@@ -1511,6 +1514,15 @@ ON CONFLICT (username) DO NOTHING;
           </div>
         </div>
       `;
+    }
+
+    function togglePasswordVisibility(button) {
+      const field = document.getElementById('login-password');
+      const reveal = field.type === 'password';
+      field.type = reveal ? 'text' : 'password';
+      button.title = reveal ? 'Sembunyikan kata sandi' : 'Tampilkan kata sandi';
+      button.setAttribute('aria-label',button.title);
+      button.querySelector('[data-slash]').classList.toggle('hidden',!reveal);
     }
 
     async function handleLoginSubmit(e) {
@@ -4044,7 +4056,8 @@ ON CONFLICT (username) DO NOTHING;
       { label: 'Produksi', job: 'Cek produksi' },
       { label: 'kas-ipd32-dev', job: 'Cek kas-ipd32-dev' },
     ];
-    const healthCache = { results: null, fetchedAt: 0, pending: null };
+    const healthCache = { results: null, fetchedAt: 0, pending: null, pages: 1, hasMore: false };
+    const completedHealthRuns = new Map();
 
     async function readHealthResults() {
       const root = 'https://api.github.com/repos/adminhostipd32-svg/KasIPD32/actions';
@@ -4056,29 +4069,59 @@ ON CONFLICT (username) DO NOTHING;
         if (!response.ok) throw new Error('GitHub HTTP ' + response.status);
         return response.json();
       }
-      const { workflow_runs } = await read('/workflows/cek-supabase-kas.yml/runs?branch=main&per_page=5');
-      const results = healthTargets.map(() => ({ latest: '', check: null }));
+      const workflow_runs = [];
+      let total = 0;
+      for (let page=1; page<=healthCache.pages; page++) {
+        const batch = await read('/workflows/cek-supabase-kas.yml/runs?branch=main&per_page=8&page='+page);
+        workflow_runs.push(...batch.workflow_runs);
+        total = batch.total_count;
+        if (batch.workflow_runs.length < 8) break;
+      }
+      const results = healthTargets.map(() => ({ latest: '', check: null, history: [] }));
       for (const [index, run] of workflow_runs.entries()) {
-        const { jobs } = await read('/runs/' + run.id + '/jobs?filter=latest');
+        const cacheKey = run.id + ':' + run.run_attempt;
+        let jobs = completedHealthRuns.get(cacheKey);
+        if (!jobs) {
+          jobs = [];
+          for (let page=1; ; page++) {
+            const batch = await read('/runs/' + run.id + '/jobs?filter=all&per_page=100&page='+page);
+            jobs.push(...batch.jobs);
+            if (batch.jobs.length < 100) break;
+          }
+          if (run.status==='completed' && jobs.length) completedHealthRuns.set(cacheKey,jobs);
+        }
         healthTargets.forEach((target, i) => {
           const row = results[i];
-          const job = jobs.find(j => j.name === target.job || (i === 0 && j.name === 'cek-database'));
+          const matching = jobs.filter(j => j.name === target.job || (i === 0 && j.name === 'cek-database')).sort((a,b)=>b.id-a.id);
+          const job = matching[0];
           const step = job?.steps?.find(s => s.name.startsWith('Periksa akses baca ke periode kas'));
           if (index === 0) {
             if (run.status !== 'completed' && (!job || job.status !== 'completed')) row.latest = 'Pemeriksaan berikutnya sedang berjalan atau menunggu giliran.';
             else if (!step || !['success','failure','timed_out'].includes(step.conclusion)) row.latest = 'Run terbaru belum menghasilkan pemeriksaan database.';
           }
-          if (!row.check && step?.completed_at && ['success','failure','timed_out'].includes(step.conclusion)) {
-            row.check = { ok: step.conclusion === 'success', time: step.completed_at };
+          for (const attempt of matching) {
+            const finished = attempt.steps?.find(s=>s.name.startsWith('Periksa akses baca ke periode kas'));
+            if (finished?.completed_at && ['success','failure','timed_out'].includes(finished.conclusion)) {
+              row.history.push({id:attempt.id, ok:finished.conclusion==='success', time:finished.completed_at});
+            }
           }
         });
-        if (results.every(row => row.check)) break;
       }
+      for (const row of results) {
+        row.history = [...new Map(row.history.map(check=>[check.id,check])).values()].sort((a,b)=>Date.parse(b.time)-Date.parse(a.time)||b.id-a.id);
+        row.check = row.history[0] || null;
+      }
+      healthCache.hasMore = workflow_runs.length < total;
       return results;
     }
 
     class DatabaseCheckPanel extends HTMLElement {
       connectedCallback() { this.refresh(); }
+      async older() {
+        if (healthCache.pending || !healthCache.hasMore || State.session?.role !== 'it_support') return;
+        healthCache.pages++;
+        await this.refresh(true);
+      }
       async refresh(force = false) {
         if (State.session?.role !== 'it_support') return;
         const draw = (busy, error = '') => {
@@ -4094,7 +4137,18 @@ ON CONFLICT (username) DO NOTHING;
                 <span class="rounded-full px-2.5 py-1 text-xs font-bold ${check?(check.ok?'bg-emerald-50 text-emerald-800':'bg-rose-50 text-rose-800'):'bg-slate-100 text-slate-600'}">${check?(check.ok?'Berhasil':'Gagal'):'Belum tersedia'}</span></div>
                 <p class="mt-2 text-sm text-slate-600">${time?'Terakhir diperiksa · '+time:busy?'Memuat waktu pemeriksaan…':'Belum ada waktu pemeriksaan yang tersedia.'}</p>
                 ${row?.latest?`<p class="mt-1 text-xs text-slate-500">${row.latest}</p>`:''}</div>`;
-            }).join('')}</div></section>`;
+            }).join('')}</div>
+            <h3 class="font-bold text-slate-900">Riwayat pengecekan</h3>
+            <div class="grid gap-3 sm:grid-cols-2">${healthTargets.map((target,i)=>{
+              const checks=healthCache.results?.[i]?.history || [];
+              return `<div class="rounded-xl border border-slate-200 overflow-hidden"><h4 class="bg-teal-50 px-4 py-2 font-semibold">${target.label}</h4>${checks.length?`<ol class="divide-y max-h-80 overflow-y-auto">${checks.map((c,index)=>{
+                const recovered=c.ok && checks[index+1]?.ok===false;
+                const label=recovered?'Berhasil kembali':c.ok?'Berhasil':'Gagal';
+                const when=new Date(c.time).toLocaleString('id-ID',{timeZone:'Asia/Jakarta',dateStyle:'medium',timeStyle:'medium'});
+                return `<li class="flex flex-wrap gap-2 items-center justify-between px-4 py-2 text-xs"><time datetime="${escapeHtml(c.time)}">${when} WIB</time><b class="${c.ok?'text-emerald-700':'text-rose-700'}">${label}</b></li>`;
+              }).join('')}</ol>`:'<p class="p-4 text-sm text-slate-500">Belum ada hasil yang dimuat.</p>'}</div>`;
+            }).join('')}</div>
+            ${healthCache.hasMore?`<button type="button" ${busy?'disabled':''} class="rounded-xl border px-3 py-2 text-xs font-semibold" onclick="this.closest('database-check-panel').older()">Muat riwayat lebih lama</button>`:''}</section>`;
         };
         if (!force && healthCache.results && Date.now()-healthCache.fetchedAt < 60000) { draw(false); return; }
         draw(true);

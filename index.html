@@ -217,7 +217,7 @@ CREATE TABLE IF NOT EXISTS public.anggota (
 CREATE TABLE IF NOT EXISTS public.iuran_kas (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   anggota_id UUID NOT NULL REFERENCES public.anggota(id) ON DELETE CASCADE,
-  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE CASCADE,
+  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE RESTRICT,
   bulan SMALLINT NOT NULL CHECK (bulan BETWEEN 1 AND 12),
   nominal BIGINT NOT NULL DEFAULT 0,
   tanggal_bayar DATE DEFAULT CURRENT_DATE,
@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS public.iuran_kas (
 CREATE TABLE IF NOT EXISTS public.saldo_lebih_bayar (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   anggota_id UUID NOT NULL REFERENCES public.anggota(id) ON DELETE CASCADE,
-  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE CASCADE,
+  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE RESTRICT,
   nominal BIGINT NOT NULL DEFAULT 0,
   keterangan TEXT,
   updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -241,10 +241,11 @@ CREATE TABLE IF NOT EXISTS public.saldo_lebih_bayar (
 CREATE TABLE IF NOT EXISTS public.patungan_event (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   nama_event TEXT NOT NULL,
-  tahun INT NOT NULL,
+  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE RESTRICT,
   tarif_default BIGINT NOT NULL DEFAULT 0,
   catatan_tarif TEXT,
   total_pengeluaran BIGINT NOT NULL DEFAULT 0,
+  subsidi_kas BIGINT CHECK (subsidi_kas >= 0),
   status TEXT NOT NULL DEFAULT 'Berjalan' CHECK (status IN ('Berjalan', 'Selesai')),
   terposting_ke_kas BOOLEAN NOT NULL DEFAULT FALSE,
   keterangan TEXT,
@@ -267,7 +268,7 @@ CREATE TABLE IF NOT EXISTS public.patungan_peserta (
 -- 7. Tabel Transaksi Kas (Pemasukan Lain & Pengeluaran)
 CREATE TABLE IF NOT EXISTS public.transaksi_kas (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tahun INT NOT NULL,
+  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE RESTRICT,
   bulan SMALLINT NOT NULL CHECK (bulan BETWEEN 1 AND 12),
   tanggal DATE NOT NULL DEFAULT CURRENT_DATE,
   tipe TEXT NOT NULL CHECK (tipe IN ('masuk_lain', 'keluar')),
@@ -279,6 +280,38 @@ CREATE TABLE IF NOT EXISTS public.transaksi_kas (
 );
 
 -- ============================================================
+create or replace function public.posting_patungan(p_event uuid, p_tanggal date)
+returns void language plpgsql security invoker set search_path = '' as $$
+declare
+  acara public.patungan_event%rowtype;
+  terkumpul bigint;
+  subsidi bigint;
+  sisa bigint;
+begin
+  select * into strict acara from public.patungan_event where id = p_event for update;
+  if acara.terposting_ke_kas then return; end if;
+  if extract(year from p_tanggal) <> acara.tahun or p_tanggal is null then
+    raise exception 'Tanggal posting harus berada pada tahun acara.';
+  end if;
+  select coalesce(sum(nominal_bayar), 0) into terkumpul from public.patungan_peserta where patungan_id = p_event;
+  subsidi := coalesce(acara.subsidi_kas, greatest(acara.total_pengeluaran - terkumpul, 0));
+  sisa := terkumpul + subsidi - acara.total_pengeluaran;
+  if sisa < 0 then raise exception 'Dana peserta dan subsidi belum menutup biaya acara.'; end if;
+  if subsidi > 0 then
+    insert into public.transaksi_kas(tahun,bulan,tanggal,tipe,kategori,deskripsi,nominal,patungan_id)
+    values(acara.tahun,extract(month from p_tanggal),p_tanggal,'keluar','Defisit Patungan','Subsidi kas — ' || acara.nama_event,subsidi,p_event);
+  end if;
+  if sisa > 0 then
+    insert into public.transaksi_kas(tahun,bulan,tanggal,tipe,kategori,deskripsi,nominal,patungan_id)
+    values(acara.tahun,extract(month from p_tanggal),p_tanggal,'masuk_lain','Sisa Patungan','Sisa Patungan — ' || acara.nama_event,sisa,p_event);
+  end if;
+  update public.patungan_event set terposting_ke_kas=true, status='Selesai' where id=p_event;
+end;
+$$;
+revoke all on function public.posting_patungan(uuid,date) from public, anon;
+grant execute on function public.posting_patungan(uuid,date) to authenticated;
+
+
 -- ROW LEVEL SECURITY (RLS) UNTUK HYBRID AUTH
 -- Anggota (Anon / Login via Tabel) -> READ ONLY
 -- Admin (Supabase Auth Authenticated) -> FULL CRUD
@@ -433,6 +466,28 @@ ON CONFLICT (username) DO NOTHING;
     /* ============================================================================
        MODAL CONTROLLER (TANPA alert() / confirm())
     ============================================================================ */
+    function formatMoneyInput(input) {
+      const before = input.value;
+      const digits = before.replace(/\./g, '');
+      input.setCustomValidity('');
+      if (digits && !/^\d+$/.test(digits)) {
+        input.setCustomValidity('Gunakan angka rupiah bulat tanpa tanda minus atau koma.');
+        return;
+      }
+      if (!digits) { input.value = ''; return; }
+      const amount = Number(digits);
+      if (!Number.isSafeInteger(amount) || amount < Number(input.dataset.min || 0)) input.setCustomValidity('Periksa nominal rupiah.');
+      const remaining = before.slice(input.selectionStart ?? before.length).replace(/\D/g, '').length;
+      input.value = digits.replace(/^0+(?=\d)/,'').replace(/\B(?=(\d{3})+(?!\d))/g,'.');
+      let cursor = input.value.length;
+      for (let n = 0; cursor > 0 && n < remaining;) {
+        if (/\d/.test(input.value[--cursor])) n++;
+      }
+      input.setSelectionRange(cursor,cursor);
+    }
+
+    function moneyValue(id) { return Number(document.getElementById(id).value.replace(/\./g,'')); }
+
     function openModal(htmlContent, maxWidthClass = 'max-w-lg') {
       const root = document.getElementById('modal-root');
       root.innerHTML = `
@@ -441,7 +496,11 @@ ON CONFLICT (username) DO NOTHING;
         </div>
       `;
       root.classList.remove('hidden');
-      root.onclick = () => closeModal();
+      root.onclick = null;
+      root.querySelectorAll('[data-money]').forEach(input => {
+        formatMoneyInput(input);
+        input.addEventListener('input', () => formatMoneyInput(input));
+      });
       if (window.lucide) lucide.createIcons();
     }
 
@@ -859,19 +918,31 @@ ON CONFLICT (username) DO NOTHING;
         this.saveDemoStore(seed);
       },
 
+      async readPages(table, column = 'id', ascending = true) {
+        const rows = [];
+        const size = 500;
+        for (let offset = 0; ; offset += size) {
+          let query = this.client.from(table).select('*').order(column, { ascending });
+          if (column !== 'id') query = query.order('id');
+          const { data, error } = await query.range(offset, offset + size - 1);
+          if (error) throw new Error(error.message);
+          rows.push(...data);
+          if (data.length < size) return { data: rows };
+        }
+      },
+
       async fetchAll() {
         if (this.mode === 'supabase') {
           const [p, a, i, lb, t, pe, pp] = await Promise.all([
-            this.client.from('periode_kas').select('*').order('tahun', { ascending: true }),
-            this.client.from('anggota').select('*').order('nama', { ascending: true }),
-            this.client.from('iuran_kas').select('*'),
-            this.client.from('saldo_lebih_bayar').select('*'),
-            this.client.from('transaksi_kas').select('*').order('tanggal', { ascending: false }),
-            this.client.from('patungan_event').select('*').order('tahun', { ascending: false }),
-            this.client.from('patungan_peserta').select('*').order('nama_peserta', { ascending: true }),
+            this.readPages('periode_kas', 'tahun', true),
+            this.readPages('anggota', 'nama', true),
+            this.readPages('iuran_kas'),
+            this.readPages('saldo_lebih_bayar'),
+            this.readPages('transaksi_kas', 'tanggal', false),
+            this.readPages('patungan_event', 'tahun', false),
+            this.readPages('patungan_peserta', 'nama_peserta', true),
           ]);
-          const firstErr = [p, a, i, lb, t, pe, pp].find((r) => r.error)?.error;
-          if (firstErr) throw new Error(firstErr.message);
+          
           return {
             periode_kas: p.data || [],
             anggota: a.data || [],
@@ -1093,6 +1164,8 @@ ON CONFLICT (username) DO NOTHING;
       txTypeFilter: 'Semua',
       txSearch: '',
       patYearFilter: 'Semua',
+      patSearch: '',
+      reportMember: '',
       patStatusFilter: 'Semua',
       activePatunganId: null,
       settingsTab: 'anggota', // 'anggota' | 'periode' | 'supabase'
@@ -1695,6 +1768,7 @@ ON CONFLICT (username) DO NOTHING;
           </div>
 
           ${personalCardHtml}
+          ${!isAdmin() ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.session.id),activeYr) : ''}
 
           <!-- 4 KPI Cards -->
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
@@ -1948,12 +2022,47 @@ ON CONFLICT (username) DO NOTHING;
         .map(m => ({ ...m, remaining: Math.max(0, rate - (paid.get(m.num) || 0)) }));
     }
 
-    function reportTable(title, headers, rows, empty = '') {
-      const cells = rows.map(row => `<tr class="hover:bg-slate-50/70 transition">${row.map((v,i) => `<td class="px-4 py-3 ${i ? 'text-right whitespace-nowrap tabular-nums font-semibold' : 'text-left font-medium'}">${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('');
+    function memberBalanceCard(member,year,throughMonth=12) {
+      if (!member) return '';
+      const status = membershipForYear(member,year);
+      const rate=getTarifForYear(year);
+      let months=status ? memberDues(member,year,rate,new Date(year,11,31)).filter(m=>m.num<=throughMonth) : [];
+      let note='';
+      if (status && status!=='Aktif') {
+        const text=(member.catatan_status||'').toLowerCase();
+        const end=MONTHS.find(m=>text.includes(m.full.toLowerCase()) || new RegExp('\\b'+m.short.toLowerCase()+'(?:t)?\\b').test(text));
+        if(end && text.includes(String(year))) months=months.filter(m=>m.num<=end.num);
+        else if(!text.includes(`setelah ${year}`)){
+          months=months.filter(m=>State.data.iuran_kas.some(p=>p.anggota_id===member.id && Number(p.tahun)===year && Number(p.bulan)===m.num));
+          note='Batas kewajiban anggota nonaktif belum lengkap. Bulan yang belum memiliki setoran perlu dikonfirmasi bendahara.';
+        }
+      }
+      const now=new Date();
+      const pending=months.filter(m=>m.remaining>0).map(m=>[m.full,year>now.getFullYear() || (year===now.getFullYear()&&m.num>now.getMonth()+1)?'Belum jatuh tempo':'Belum lunas',formatRp(m.remaining)]);
+      const events=new Map(State.data.patungan_event.filter(e=>Number(e.tahun)===year).map(e=>[e.id,e.nama_event]));
+      const participants=State.data.patungan_peserta.filter(p=>p.anggota_id===member.id && events.has(p.patungan_id));
+      const unpaid=participants.filter(p=>Number(p.tarif_target)>Number(p.nominal_bayar)).map(p=>[events.get(p.patungan_id),formatRp(p.nominal_bayar),formatRp(Number(p.tarif_target)-Number(p.nominal_bayar))]);
+      return `<section class="space-y-3"><h3 class="font-bold text-slate-900">${escapeHtml(member.nama)} · ${year}</h3><p class="text-xs text-slate-500">Iuran sampai ${MONTHS[throughMonth-1].full} ${year}. Patungan mencakup seluruh acara tahun ${year}.</p>
+        ${reportTable('Iuran yang belum lunas',['Bulan','Status','Sisa'],pending,'Tidak ada sisa iuran pada bulan yang diperhitungkan.')}
+        ${note?`<p class="text-xs text-slate-500">${note}</p>`:''}
+        ${reportTable('Patungan yang belum lunas',['Acara','Sudah bayar','Sisa'],unpaid,'Tidak ada sisa tagihan dari peserta yang terhubung ke anggota ini.')}
+        <p class="text-xs text-slate-500">Patungan mengikuti tahun acara dan keanggotaan peserta yang tercatat.</p></section>`;
+    }
+
+    function reportTable(title, headers, rows, empty = '', cellAction = null) {
+      const cells = rows.map((row,rowIndex) => `<tr class="hover:bg-slate-50/70 transition">${row.map((v,i) => `<td class="px-4 py-3 ${i ? 'text-right whitespace-nowrap tabular-nums font-semibold' : 'text-left font-medium'}">${cellAction?.(v,i,rowIndex) ?? escapeHtml(String(v))}</td>`).join('')}</tr>`).join('');
       return `<section class="glass-card rounded-2xl overflow-hidden min-w-0">
         <h3 class="px-4 py-4 sm:px-5 font-bold text-slate-900">${title}</h3>${rows.length
         ? `<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="bg-slate-50/95 border-y border-slate-200 text-[11px] font-bold uppercase tracking-wider text-slate-500">${headers.map((h,i) => `<th scope="col" class="px-4 py-3 whitespace-nowrap ${i ? 'text-right' : 'text-left'}">${h}</th>`).join('')}</tr></thead><tbody class="divide-y divide-slate-200/70">${cells}</tbody></table></div>`
         : `<p class="px-5 pb-5 text-sm text-slate-500">${empty}</p>`}</section>`;
+    }
+
+    function openExpenseMonth(year,month) {
+      State.txYearFilter=String(year);
+      State.txMonthFilter=String(month);
+      State.txTypeFilter='keluar';
+      State.txSearch='';
+      navigateTo('transaksi');
     }
 
     function renderReportPage() {
@@ -1999,18 +2108,19 @@ ON CONFLICT (username) DO NOTHING;
         <div class="glass-card rounded-2xl p-4 grid grid-cols-2 sm:flex sm:items-end gap-3">
           <label class="grid gap-1.5 text-xs font-semibold text-slate-500">Tahun<select class="${selectStyle}" onchange="State.selectedYear=Number(this.value);renderApp()">${getAvailableYears().map(y => `<option ${year===y?'selected':''}>${y}</option>`).join('')}</select></label>
           <label class="grid gap-1.5 text-xs font-semibold text-slate-500">Periode<select class="${selectStyle}" onchange="State.reportMonth=Number(this.value);renderApp()"><option value="0">Tahunan</option>${MONTHS.map(m=>`<option value="${m.num}" ${month===m.num?'selected':''}>${m.full}</option>`).join('')}</select></label>
+          <label class="grid gap-1.5 text-xs font-semibold text-slate-500 col-span-2">Jenis laporan<select class="${selectStyle}" onchange="State.reportMember=this.value;renderApp()"><option value="">Rekap kas bersama</option>${State.data.anggota.map(m=>`<option value="${escapeHtml(m.id)}" ${State.reportMember===m.id?'selected':''}>Tagihan · ${escapeHtml(m.nama)}</option>`).join('')}</select></label>
         </div>
         <article id="member-report" class="space-y-4">
         <header class="hidden"><h2>Laporan Kas IPD 32</h2><p>${periodLabel} · Disusun ${new Date().toLocaleDateString('id-ID')}</p></header>
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">${summary.map(([label,v,icon,tone])=>`<div class="glass-card rounded-2xl p-3 sm:p-5 min-w-0">
+        ${State.reportMember ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.reportMember),year,month||12) : `<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">${summary.map(([label,v,icon,tone])=>`<div class="glass-card rounded-2xl p-3 sm:p-5 min-w-0">
           <div class="flex items-center justify-between gap-1 mb-3"><span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">${label}</span>
           <span aria-hidden="true" class="w-7 h-7 sm:w-9 sm:h-9 shrink-0 rounded-xl flex items-center justify-center ${tone}"><i data-lucide="${icon}" class="w-4 h-4"></i></span></div>
           <strong class="text-base sm:text-xl xl:text-2xl font-extrabold tabular-nums ${v < 0 ? 'text-rose-700' : 'text-slate-900'}">${formatRp(v)}</strong></div>`).join('')}</div>
-        ${reportTable('Arus kas', ['Bulan','Iuran','Masuk lain','Keluar','Selisih'],selected.map(m=>[m.full,...[m.iuran,m.other,m.spent,m.net].map(v=>formatRp(v))]))}
+        ${reportTable('Arus kas', ['Bulan','Iuran','Masuk lain','Keluar','Selisih'],selected.map(m=>[m.full,...[m.iuran,m.other,m.spent,m.net].map(v=>formatRp(v))]), '', (v,col,row)=>col===3 ? `<button class="text-teal-700 underline" onclick="openExpenseMonth(${year},${selected[row].num})" title="Rincian pengeluaran ${selected[row].full}">${escapeHtml(v)}</button>` : null)}
         <p class="text-sm">${month ? 'Saldo bulanan mencakup transaksi yang memiliki bulan. Lebih bayar tahun berjalan ditambahkan pada rekap tahunan.' : `Lebih bayar tahunan ${formatRp(annual.totalLebihBayar)} sudah termasuk dalam pemasukan dan saldo akhir.`}</p>
         ${reportTable('Penggunaan dana', ['Kategori','Jumlah'], [...categories].sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k,formatRp(v)]),'Belum ada pengeluaran tercatat pada periode ini.')}
         ${month ? '' : reportTable('Patungan acara', ['Acara','Terkumpul','Biaya','Selisih'],events.map(e=>{const stats=computePatunganStats(e.id);return [e.nama_event,formatRp(stats.terkumpul),formatRp(stats.pengeluaran),formatRp(stats.selisih)];}),'Belum ada acara tercatat pada tahun ini.')}
-        ${!month && events.length ? '<p class="text-sm">Dampak patungan pada saldo mengikuti transaksi yang tercatat di Buku Kas.</p>' : ''}</article></div>`;
+        ${!month && events.length ? '<p class="text-sm">Dampak patungan pada saldo mengikuti transaksi yang tercatat di Buku Kas.</p>' : ''}`}</article></div>`;
     }
 
     function printMemberReport() {
@@ -2056,7 +2166,7 @@ ON CONFLICT (username) DO NOTHING;
         .map(member => ({ ...member, status: membershipForYear(member, activeYr) }))
         .filter(member => member.status)
         .map((m) => {
-          const due = memberDues(m, activeYr, tarif);
+          const due = memberDues(m, activeYr, tarif, new Date(activeYr, 11, 31));
           let totalBayar = 0;
           for (let b = 1; b <= 12; b++) {
             const cell = iuranMap[`${m.id}_${b}`];
@@ -2108,7 +2218,7 @@ ON CONFLICT (username) DO NOTHING;
             <div>
               <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">Matriks Iuran Kas ${activeYr}</h1>
               <p class="text-sm text-slate-500 mt-0.5">
-                Tarif wajib: <b class="text-teal-700 tabular-nums">${formatRp(tarif)} / bulan</b>
+                Status lunas dihitung sampai Desember. Tarif wajib: <b class="text-teal-700 tabular-nums">${formatRp(tarif)} / bulan</b>
                 ${admin ? ' • Klik sel bulan atau kolom Lebih Bayar untuk input cepat' : ' • Mode Transparansi Anggota'}
               </p>
             </div>
@@ -2132,7 +2242,7 @@ ON CONFLICT (username) DO NOTHING;
           </div>
 
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-            ${[['Total anggota', eligible.length], ['Lunas', eligible.filter(r => r.derivedStatus === 'Lunas').length],
+            ${[['Total anggota', eligible.length], ['Lunas s.d. Desember', eligible.filter(r => r.derivedStatus === 'Lunas').length],
               ['Kurang bayar', eligible.filter(r => r.derivedStatus === 'Kurang Bayar').length],
               ['Nonaktif', eligible.filter(r => r.member.status !== 'Aktif').length]].map(([label, value]) =>
               `<div class="glass-card rounded-xl p-3"><p class="text-xs text-slate-500">${label}</p><strong>${value}</strong></div>`).join('')}
@@ -2204,7 +2314,7 @@ ON CONFLICT (username) DO NOTHING;
                           .map((r, idx) => {
                             const isSelf = !admin && State.session?.id === r.member.id;
                             return `
-                              <tr data-member="${escapeHtml(r.member.id)}" data-status="${escapeHtml(r.member.status)}" class="${isSelf ? 'bg-teal-50/40' : 'hover:bg-slate-50/70'} transition">
+                              <tr data-member="${escapeHtml(r.member.id)}" data-status="${escapeHtml(r.member.status)}" data-payment-status="${escapeHtml(r.derivedStatus)}" class="${isSelf ? 'bg-teal-50/40' : 'hover:bg-slate-50/70'} transition">
                                 <td class="sticky left-0 z-10 ${isSelf ? 'bg-teal-50/95' : 'bg-white'} py-2.5 px-3 text-center font-semibold text-slate-400 tabular-nums">
                                   ${idx + 1}
                                 </td>
@@ -2269,7 +2379,7 @@ ON CONFLICT (username) DO NOTHING;
                                   </button>
                                 </td>
                                 <td class="py-2.5 px-3 text-[11px] text-slate-500 max-w-[160px] truncate" title="${escapeHtml(r.member.catatan_status || '')}">
-                                  ${escapeHtml(r.member.catatan_status || '—')}
+                                  ${admin ? `<button class="text-teal-700 hover:underline" title="Edit catatan anggota" onclick="openMemberNote('${r.member.id}')">${escapeHtml(r.member.catatan_status || 'Tambah catatan')}</button>` : escapeHtml(r.member.catatan_status || '—')}
                                 </td>
                               </tr>
                             `;
@@ -2317,14 +2427,14 @@ ON CONFLICT (username) DO NOTHING;
         <form onsubmit="saveIuranCell(event, '${anggotaId}', ${tahun}, ${bulan})" class="p-5 space-y-4">
           <div>
             <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nominal Bayar (Rp)</label>
-            <input id="iu-nominal" type="number" min="0" step="1000" required value="${existing ? existing.nominal : tarif}"
-              oninput="checkIuranAnomaly(this.value, ${tarif})"
+            <input id="iu-nominal" type="text" inputmode="numeric" data-money data-min="0" required value="${existing ? existing.nominal : tarif}"
+              oninput="checkIuranAnomaly(moneyValue(this.id), ${tarif})"
               class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
             <div id="iu-anomaly-warn" class="hidden mt-2 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 font-medium">
               ⚠️ Nominal ini lebih dari 2× tarif bulanan (${formatRp(tarif)}). Pastikan tidak salah ketik angka nol (contoh: 150.000 vs 15.000).
             </div>
             <div class="flex items-center gap-2 mt-2">
-              <button type="button" onclick="document.getElementById('iu-nominal').value=${tarif}; checkIuranAnomaly(${tarif}, ${tarif});" class="px-2.5 py-1 rounded-lg bg-teal-50 text-teal-700 text-xs font-semibold hover:bg-teal-100">
+              <button type="button" onclick="document.getElementById('iu-nominal').value='${tarif.toLocaleString('id-ID')}'; checkIuranAnomaly(${tarif}, ${tarif});" class="px-2.5 py-1 rounded-lg bg-teal-50 text-teal-700 text-xs font-semibold hover:bg-teal-100">
                 Sesuai Tarif (${formatRp(tarif)})
               </button>
             </div>
@@ -2368,7 +2478,7 @@ ON CONFLICT (username) DO NOTHING;
 
     async function saveIuranCell(e, anggota_id, tahun, bulan) {
       e.preventDefault();
-      const nominal = Number(document.getElementById('iu-nominal').value) || 0;
+      const nominal = moneyValue('iu-nominal') || 0;
       const tanggal_bayar = document.getElementById('iu-tanggal').value || new Date().toISOString().slice(0, 10);
       const keterangan = document.getElementById('iu-ket').value.trim();
       try {
@@ -2414,7 +2524,7 @@ ON CONFLICT (username) DO NOTHING;
         <form onsubmit="saveLebihBayar(event, '${anggotaId}', ${tahun})" class="p-5 space-y-4">
           <div>
             <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nominal Lebih Bayar (Rp)</label>
-            <input id="lb-nominal" type="number" min="0" step="1000" required value="${existing ? existing.nominal : 0}"
+            <input id="lb-nominal" type="text" inputmode="numeric" data-money data-min="0" required value="${existing ? existing.nominal : 0}"
               class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
           </div>
           <div>
@@ -2432,7 +2542,7 @@ ON CONFLICT (username) DO NOTHING;
 
     async function saveLebihBayar(e, anggota_id, tahun) {
       e.preventDefault();
-      const nominal = Number(document.getElementById('lb-nominal').value) || 0;
+      const nominal = moneyValue('lb-nominal') || 0;
       const keterangan = document.getElementById('lb-ket').value.trim();
       try {
         await DB.upsertLebihBayar({ anggota_id, tahun, nominal, keterangan });
@@ -2481,7 +2591,7 @@ ON CONFLICT (username) DO NOTHING;
       const lebihMap = {};
       State.data.saldo_lebih_bayar.filter((l) => Number(l.tahun) === yr).forEach((l) => { lebihMap[l.anggota_id] = l.nominal; });
 
-      const headers = ['No', 'Nama', 'Peran', 'Status', ...MONTHS.map((m) => m.short), 'Total Iuran', 'Lebih Bayar'];
+      const headers = ['No', 'Nama', 'Peran', 'Status anggota', 'Status iuran tahunan', ...MONTHS.map((m) => m.short), 'Total Iuran', 'Lebih Bayar'];
       const lines = [headers.join(',')];
       Array.from(document.querySelectorAll('#matrix tbody tr[data-member]')).forEach((row, idx) => {
         const m = State.data.anggota.find(member => member.id === row.dataset.member);
@@ -2492,7 +2602,7 @@ ON CONFLICT (username) DO NOTHING;
           return v;
         });
         const lb = Number(lebihMap[m.id]) || 0;
-        lines.push([idx + 1, `"${m.nama.replace(/"/g, '""')}"`, m.peran, row.dataset.status, ...mCols, tot, lb].join(','));
+        lines.push([idx + 1, `"${m.nama.replace(/"/g, '""')}"`, m.peran, row.dataset.status, row.dataset.paymentStatus, ...mCols, tot, lb].join(','));
       });
 
       const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
@@ -2713,7 +2823,7 @@ ON CONFLICT (username) DO NOTHING;
 
           <div>
             <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nominal (Rp)</label>
-            <input id="tx-nominal" type="number" min="1" required value="${tx?.nominal || ''}" placeholder="Contoh: 250000"
+            <input id="tx-nominal" type="text" inputmode="numeric" data-money data-min="1" required value="${tx?.nominal || ''}" placeholder="Contoh: 250000"
               class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
           </div>
 
@@ -2736,7 +2846,7 @@ ON CONFLICT (username) DO NOTHING;
       const tipe = document.getElementById('tx-tipe').value;
       const tanggal = document.getElementById('tx-tanggal').value;
       const kategori = document.getElementById('tx-kategori').value;
-      const nominal = Number(document.getElementById('tx-nominal').value) || 0;
+      const nominal = moneyValue('tx-nominal') || 0;
       const deskripsi = document.getElementById('tx-deskripsi').value.trim();
       const dt = new Date(tanggal + 'T00:00:00');
       const tahun = dt.getFullYear();
@@ -2780,6 +2890,10 @@ ON CONFLICT (username) DO NOTHING;
     /* ============================================================================
        6. PAGE: PATUNGAN & ACARA (LIST + DETAIL PESERTA + POSTING KE KAS)
     ============================================================================ */
+    function subsidyLabel(ev,stats) {
+      return ev.subsidi_kas==null ? `${formatRp(Math.max(0,-stats.selisih))} (otomatis)` : formatRp(ev.subsidi_kas);
+    }
+
     function renderPatunganPage() {
       if (State.activePatunganId) {
         return renderPatunganDetail(State.activePatunganId);
@@ -2788,6 +2902,7 @@ ON CONFLICT (username) DO NOTHING;
       const admin = isAdmin();
       const years = [...new Set(State.data.patungan_event.map((p) => Number(p.tahun)))].sort((a, b) => b - a);
       const filtered = State.data.patungan_event.filter((ev) => {
+        if (!ev.nama_event.toLowerCase().includes(State.patSearch.trim().toLowerCase())) return false;
         if (State.patYearFilter !== 'Semua' && String(ev.tahun) !== String(State.patYearFilter)) return false;
         if (State.patStatusFilter !== 'Semua' && ev.status !== State.patStatusFilter) return false;
         return true;
@@ -2822,6 +2937,7 @@ ON CONFLICT (username) DO NOTHING;
           <!-- Filter & Rekap Patungan -->
           <div class="glass-card rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div class="flex flex-wrap items-center gap-2">
+              <input id="patSearch" aria-label="Cari acara" value="${escapeHtml(State.patSearch)}" oninput="updateSearch(this)" placeholder="Cari nama acara…" class="px-3 py-2 rounded-xl border border-slate-200 text-sm">
               <select onchange="State.patYearFilter=this.value; renderApp();" class="px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-800">
                 <option value="Semua" ${State.patYearFilter === 'Semua' ? 'selected' : ''}>Semua Tahun</option>
                 ${years.map((y) => `<option value="${y}" ${String(State.patYearFilter) === String(y) ? 'selected' : ''}>Tahun ${y}</option>`).join('')}
@@ -2846,7 +2962,7 @@ ON CONFLICT (username) DO NOTHING;
           <!-- Grid Event Cards -->
           ${
             filtered.length === 0
-              ? `<div class="glass-card rounded-2xl p-12 text-center text-sm text-slate-400">Belum ada event patungan.</div>`
+              ? `<div class="glass-card rounded-2xl p-12 text-center text-sm text-slate-400">Tidak ada acara yang cocok dengan filter.</div>`
               : `
               <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 ${filtered
@@ -2876,7 +2992,7 @@ ON CONFLICT (username) DO NOTHING;
                           <p class="text-xs text-slate-500 mt-1 line-clamp-2">${escapeHtml(ev.catatan_tarif || `Tarif default ${formatRp(ev.tarif_default)}`)}</p>
                         </div>
 
-                        <div class="mt-4 pt-4 border-t border-slate-200/70 space-y-2.5">
+                        <div class="mt-4 pt-4 border-t border-slate-200/70 space-y-2.5"><p class="text-xs text-slate-500">Subsidi kas <b>${subsidyLabel(ev,st)}</b></p>
                           <div class="flex items-center justify-between text-xs">
                             <span class="text-slate-500 font-medium">${st.lunasCount}/${st.totalPeserta} peserta lunas</span>
                             <span class="font-bold tabular-nums text-slate-800">${pct}%</span>
@@ -2967,6 +3083,7 @@ ON CONFLICT (username) DO NOTHING;
             }
           </div>
 
+          <div class="glass-card rounded-2xl p-4"><div class="text-xs font-semibold text-slate-500">Subsidi kas</div><strong>${subsidyLabel(ev,st)}</strong><div class="text-xs text-slate-500">Saldo acara setelah subsidi: ${formatRp(st.selisih + Number(ev.subsidi_kas ?? Math.max(0,-st.selisih)))}</div></div>
           <!-- 4 Ringkasan Event -->
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <div class="glass-card rounded-2xl p-4">
@@ -2980,9 +3097,9 @@ ON CONFLICT (username) DO NOTHING;
               <div class="text-xs text-slate-500 mt-0.5">Harga kado / konsumsi acara</div>
             </div>
             <div class="glass-card rounded-2xl p-4">
-              <div class="text-[11px] font-bold uppercase text-slate-500">Selisih (±)</div>
+              <div class="text-[11px] font-bold uppercase text-slate-500">Selisih sebelum subsidi</div>
               <div class="text-xl font-extrabold tabular-nums ${isSurplus ? 'text-teal-700' : 'text-rose-700'} mt-1">${formatRp(st.selisih, true)}</div>
-              <div class="text-xs text-slate-500 mt-0.5">${isSurplus ? 'Surplus → Sisa Patungan' : 'Defisit → Subsidi Kas'}</div>
+              <div class="text-xs text-slate-500 mt-0.5">Dana peserta dikurangi pengeluaran</div>
             </div>
             <div class="glass-card rounded-2xl p-4">
               <div class="text-[11px] font-bold uppercase text-slate-500">Tarif Default</div>
@@ -3115,14 +3232,18 @@ ON CONFLICT (username) DO NOTHING;
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tarif Default (Rp)</label>
-              <input id="pe-tarif" type="number" min="0" required value="${ev?.tarif_default ?? 35000}"
+              <input id="pe-tarif" type="text" inputmode="numeric" data-money data-min="0" required value="${ev?.tarif_default ?? 35000}"
                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
             </div>
             <div>
               <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Total Pengeluaran (Rp)</label>
-              <input id="pe-keluar" type="number" min="0" required value="${ev?.total_pengeluaran ?? 0}"
+              <input id="pe-keluar" type="text" inputmode="numeric" data-money data-min="0" required value="${ev?.total_pengeluaran ?? 0}"
                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
             </div>
+            <label class="block text-xs font-bold text-slate-600">Subsidi kas (Rp)
+              <input id="pe-subsidi" type="text" inputmode="numeric" data-money placeholder="Otomatis sesuai defisit" value="${ev?.subsidi_kas ?? ''}" ${ev?.terposting_ke_kas?'disabled':''} class="mt-1 w-full rounded-xl border p-2.5">
+              <span class="font-normal">Kosong untuk menutup defisit otomatis. Isi 0 jika tanpa subsidi.</span>
+            </label>
           </div>
           <div>
             <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Catatan Tarif (Jika Multi-Tarif)</label>
@@ -3147,8 +3268,9 @@ ON CONFLICT (username) DO NOTHING;
         nama_event: document.getElementById('pe-nama').value.trim(),
         tahun: Number(document.getElementById('pe-tahun').value),
         status: document.getElementById('pe-status').value,
-        tarif_default: Number(document.getElementById('pe-tarif').value) || 0,
-        total_pengeluaran: Number(document.getElementById('pe-keluar').value) || 0,
+        subsidi_kas: document.getElementById('pe-subsidi').value === '' ? null : moneyValue('pe-subsidi'),
+        tarif_default: moneyValue('pe-tarif') || 0,
+        total_pengeluaran: moneyValue('pe-keluar') || 0,
         catatan_tarif: document.getElementById('pe-catatan').value.trim(),
         keterangan: document.getElementById('pe-ket').value.trim(),
       };
@@ -3253,12 +3375,12 @@ ON CONFLICT (username) DO NOTHING;
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tarif Target (Rp)</label>
-              <input id="pp-target" type="number" min="0" required value="${p?.tarif_target ?? ev?.tarif_default ?? 0}"
+              <input id="pp-target" type="text" inputmode="numeric" data-money data-min="0" required value="${p?.tarif_target ?? ev?.tarif_default ?? 0}"
                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
             </div>
             <div>
               <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nominal Bayar (Rp)</label>
-              <input id="pp-bayar" type="number" min="0" required value="${p?.nominal_bayar ?? 0}"
+              <input id="pp-bayar" type="text" inputmode="numeric" data-money data-min="0" required value="${p?.nominal_bayar ?? 0}"
                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
             </div>
           </div>
@@ -3279,8 +3401,8 @@ ON CONFLICT (username) DO NOTHING;
       e.preventDefault();
       const anggota_id = document.getElementById('pp-anggota').value || null;
       const nama_peserta = document.getElementById('pp-nama').value.trim();
-      const tarif_target = Number(document.getElementById('pp-target').value) || 0;
-      const nominal_bayar = Number(document.getElementById('pp-bayar').value) || 0;
+      const tarif_target = moneyValue('pp-target') || 0;
+      const nominal_bayar = moneyValue('pp-bayar') || 0;
       const status_bayar = nominal_bayar >= tarif_target && nominal_bayar > 0 ? 'Lunas' : 'Belum Bayar';
       const keterangan = document.getElementById('pp-ket').value.trim();
 
@@ -3336,60 +3458,40 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function postingPatunganKeKas(eventId) {
-      if (!isAdmin()) return;
-      const ev = State.data.patungan_event.find((e) => e.id === eventId);
-      if (!ev) return;
-      const st = computePatunganStats(eventId);
-      const isSurplus = st.selisih >= 0;
-      const absSelisih = Math.abs(st.selisih);
-
-      if (absSelisih === 0) {
-        openConfirmModal({
-          title: 'Tandai Event Selesai & Terposting?',
-          message: 'Selisih patungan Rp 0 (pas). Event akan ditandai sudah terposting tanpa menambah transaksi kas baru.',
-          confirmLabel: 'Ya, Tandai Selesai',
-          onConfirm: async () => {
-            await DB.updateRow('patungan_event', eventId, { status: 'Selesai', terposting_ke_kas: true });
-            showToast('Event ditandai selesai & terposting.', 'success');
-            await refreshData(true);
-          },
-        });
-        return;
-      }
-
-      openConfirmModal({
-        title: isSurplus ? 'Posting Sisa Patungan ke Kas Masuk?' : 'Posting Defisit Patungan ke Pengeluaran Kas?',
-        message: isSurplus
-          ? `Surplus sebesar ${formatRp(absSelisih)} dari "${ev.nama_event}" akan dicatat otomatis sebagai Pemasukan Lain (Sisa Patungan).`
-          : `Kekurangan dana sebesar ${formatRp(absSelisih)} dari "${ev.nama_event}" akan dicatat otomatis sebagai Pengeluaran Kas (Defisit Patungan).`,
-        confirmLabel: 'Posting ke Buku Kas',
-        onConfirm: async () => {
-          try {
-            const today = new Date();
-            const tanggal = today.toISOString().slice(0, 10);
-            await DB.insertRow('transaksi_kas', {
-              tahun: Number(ev.tahun) || today.getFullYear(),
-              bulan: today.getMonth() + 1,
-              tanggal,
-              tipe: isSurplus ? 'masuk_lain' : 'keluar',
-              kategori: isSurplus ? 'Sisa Patungan' : 'Defisit Patungan',
-              deskripsi: `${isSurplus ? 'Sisa Patungan' : 'Subsidi Defisit'} — ${ev.nama_event}`,
-              nominal: absSelisih,
-              patungan_id: eventId,
-            });
-            await DB.updateRow('patungan_event', eventId, { status: 'Selesai', terposting_ke_kas: true });
-            showToast('Selisih patungan berhasil diposting ke Buku Kas!', 'success');
-            await refreshData(true);
-          } catch (err) {
-            showToast('Gagal posting ke kas: ' + err.message, 'error');
+      if(!isAdmin())return;
+      const ev=State.data.patungan_event.find(e=>e.id===eventId);
+      if(!ev||ev.terposting_ke_kas)return;
+      const st=computePatunganStats(eventId);
+      const subsidy=ev.subsidi_kas??Math.max(0,-st.selisih);
+      const surplus=st.selisih+Number(subsidy);
+      if(surplus<0)return showToast(`Dana masih kurang ${formatRp(-surplus)}. Periksa subsidi atau setoran peserta.`,'error');
+      const today=new Date();
+      const defaultDay=Number(ev.tahun)===today.getFullYear()?`${ev.tahun}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`:'';
+      openModal(`<form id="post-event" class="p-5 space-y-4"><h3 class="font-bold">Posting ke Buku Kas</h3><p>${escapeHtml(ev.nama_event)}</p><p>Subsidi keluar <b>${formatRp(subsidy)}</b> · Sisa kembali ke kas <b>${formatRp(surplus)}</b></p><label class="block">Tanggal posting <input required id="post-date" type="date" class="border p-2 rounded" value="${defaultDay}" min="${ev.tahun}-01-01" max="${ev.tahun}-12-31"></label><button type="button" onclick="closeModal()">Batal</button> <button class="rounded-xl bg-teal-700 text-white px-3 py-2">Konfirmasi posting</button></form>`);
+      document.getElementById('post-event').onsubmit=async e=>{
+        e.preventDefault();
+        const date=document.getElementById('post-date').value;
+        const submit=e.currentTarget.querySelector('button:not([type])');
+        submit.disabled=true;
+        try {
+          if(DB.mode==='supabase'){
+            const {error}=await DB.client.rpc('posting_patungan',{p_event:eventId,p_tanggal:date});
+            if(error)throw error;
+          }else{
+            const data=DB.getDemoStore();
+            const item=data.patungan_event.find(x=>x.id===eventId);
+            if(!item.terposting_ke_kas){
+              for(const [nominal,tipe,kategori] of [[subsidy,'keluar','Defisit Patungan'],[surplus,'masuk_lain','Sisa Patungan']]){
+                if(nominal>0)data.transaksi_kas.push({id:generateUuid(),tahun:ev.tahun,bulan:Number(date.slice(5,7)),tanggal:date,tipe,kategori,deskripsi:`${kategori} — ${ev.nama_event}`,nominal,patungan_id:eventId});
+              }
+              Object.assign(item,{terposting_ke_kas:true,status:'Selesai'});DB.saveDemoStore(data);
+            }
           }
-        },
-      });
+          closeModal();await refreshData(true);showToast('Posting acara tersimpan.','success');
+        }catch(err){submit.disabled=false;showToast(err.message,'error');}
+      };
     }
 
-    /* ============================================================================
-       7. PAGE: ANGGOTA, PERIODE & PENGATURAN SUPABASE (ADMIN ONLY)
-    ============================================================================ */
     function renderPengaturanPage() {
       if (!isAdmin()) {
         return `<div class="glass-card rounded-2xl p-10 text-center text-sm text-slate-500">Halaman ini khusus untuk Admin / Bendahara IPD 32.</div>`;
@@ -3435,12 +3537,14 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function renderTabAnggota() {
+      const members = State.data.anggota;
       const q = State.memberSearch.trim().toLowerCase();
       const list = State.data.anggota.filter(
         (m) => !q || m.nama.toLowerCase().includes(q) || m.username.toLowerCase().includes(q)
       );
 
       return `
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">${[['Total anggota',members.length],...['Aktif','Resign','Mutasi / Pindah'].map(label=>[label,members.filter(m=>label==='Mutasi / Pindah'?['Mutasi','Pindah'].includes(m.status):m.status===label).length])].map(([label,count])=>`<div class="glass-card rounded-2xl p-4"><p class="text-xs text-slate-500">${label}</p><strong class="text-xl">${count}</strong></div>`).join('')}</div>
         <div class="glass-card rounded-2xl overflow-hidden">
           <div class="p-4 sm:p-5 border-b border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div class="relative sm:w-72">
@@ -3501,6 +3605,17 @@ ON CONFLICT (username) DO NOTHING;
           </div>
         </div>
       `;
+    }
+
+    function openMemberNote(id) {
+      if (!isAdmin()) return;
+      const member=State.data.anggota.find(m=>m.id===id);
+      openModal(`<form id="note-form" class="space-y-4 p-5"><h3 class="font-bold">Catatan ${escapeHtml(member.nama)}</h3><label class="block text-sm">Catatan status anggota<textarea id="note-text" class="w-full rounded-xl border p-3">${escapeHtml(member.catatan_status||'')}</textarea></label><p class="text-xs text-slate-500">Pertahankan bulan dan tahun resign atau mutasi agar riwayat anggota tetap akurat.</p><button type="button" onclick="closeModal()" class="px-3 py-2">Batal</button><button class="rounded-xl bg-teal-700 text-white px-3 py-2">Simpan catatan</button></form>`);
+      document.getElementById('note-form').onsubmit=async e=>{
+        e.preventDefault();
+        try {await DB.updateRow('anggota',id,{catatan_status:document.getElementById('note-text').value.trim()});closeModal();await refreshData(true);}
+        catch(err){showToast(err.message,'error');}
+      };
     }
 
     function openMemberModal(editId = null) {
@@ -3608,6 +3723,23 @@ ON CONFLICT (username) DO NOTHING;
       });
     }
 
+    function periodHasData(data,year) {
+      return ['iuran_kas','saldo_lebih_bayar','transaksi_kas','patungan_event'].some(table=>data[table].some(r=>Number(r.tahun)===Number(year)));
+    }
+
+    function deleteEmptyPeriod(id) {
+      if(!isAdmin())return;
+      const period=State.data.periode_kas.find(p=>p.id===id);
+      if(!period)return;
+      if(periodHasData(State.data,period.tahun))return showToast('Periode ini masih memiliki data.','error');
+      openConfirmModal({title:`Hapus periode ${period.tahun}?`,message:'Periode beserta tarif akan dihapus jika masih kosong.',confirmLabel:'Hapus periode kosong',danger:true,onConfirm:async()=>{
+        try{
+          if(DB.mode==='demo' && periodHasData(DB.getDemoStore(),period.tahun))throw Error('Periode sudah memiliki data.');
+          await DB.deleteRow('periode_kas',id);await refreshData(true);showToast('Periode kosong dihapus.','success');
+        }catch(err){showToast(err.code==='23503'?'Periode sudah berisi data dan dilindungi.':err.message,'error');}
+      }});
+    }
+
     function renderTabPeriode() {
       const list = [...State.data.periode_kas].sort((a, b) => Number(b.tahun) - Number(a.tahun));
       return `
@@ -3634,9 +3766,9 @@ ON CONFLICT (username) DO NOTHING;
                   </div>
                   <div class="text-xs text-slate-500 mt-1">${escapeHtml(p.keterangan || '—')}</div>
                 </div>
-                <button onclick="openPeriodeModal('${p.id}')" class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700">
+                <div class="flex flex-wrap gap-2"><button onclick="openPeriodeModal('${p.id}')" class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700">
                   Edit Tarif
-                </button>
+                </button><button ${periodHasData(State.data,p.tahun)?'disabled title="Tahun sudah berisi data"':''} onclick="deleteEmptyPeriod('${p.id}')" class="text-xs rounded-xl px-3 py-2 text-rose-700 bg-rose-50 disabled:opacity-50">${periodHasData(State.data,p.tahun)?'Terisi · terkunci':'Hapus periode'}</button></div>
               </div>
             `
               )
@@ -3663,7 +3795,7 @@ ON CONFLICT (username) DO NOTHING;
             </div>
             <div>
               <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tarif Bulanan (Rp)</label>
-              <input id="per-tarif" type="number" min="0" step="1000" required value="${p ? p.tarif_bulanan : 20000}"
+              <input id="per-tarif" type="text" inputmode="numeric" data-money data-min="0" required value="${p ? p.tarif_bulanan : 20000}"
                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
             </div>
           </div>
@@ -3684,7 +3816,7 @@ ON CONFLICT (username) DO NOTHING;
       e.preventDefault();
       const payload = {
         tahun: Number(document.getElementById('per-tahun').value),
-        tarif_bulanan: Number(document.getElementById('per-tarif').value) || 0,
+        tarif_bulanan: moneyValue('per-tarif') || 0,
         keterangan: document.getElementById('per-ket').value.trim(),
       };
       try {

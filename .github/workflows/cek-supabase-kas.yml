@@ -1,0 +1,30 @@
+name: Cek database KAS IPD32
+
+on:
+  schedule:
+    # UTC, setara 07.17, 15.17, dan 23.17 WIB
+    - cron: '17 0,8,16 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/cek-supabase-kas.yml']
+
+permissions: {}
+
+jobs:
+  cek-database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Periksa akses baca ke periode kas produksi
+        env:
+          SUPABASE_URL: https://blplhbwuteteuojxzkmk.supabase.co
+          # Publishable key yang juga dipakai frontend. Akses mengikuti RLS.
+          SUPABASE_PUBLISHABLE_KEY: sb_publishable_CT0KHwZvZUlAtC4fsuwVuQ_byxvcKY1
+        run: |
+          status=$(curl --silent --show-error --fail --retry 2 --connect-timeout 10 --max-time 25 \
+            --header "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+            --output /dev/null --write-out '%{http_code}' \
+            "$SUPABASE_URL/rest/v1/periode_kas?select=tahun&limit=1")
+          echo "Supabase produksi merespons HTTP $status"
+          test "$status" = 200

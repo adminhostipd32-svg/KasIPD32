@@ -4040,9 +4040,78 @@ ON CONFLICT (username) DO NOTHING;
       }
     }
 
+    const healthTargets = [
+      { label: 'Produksi', job: 'Cek produksi' },
+      { label: 'kas-ipd32-dev', job: 'Cek kas-ipd32-dev' },
+    ];
+    const healthCache = { results: null, fetchedAt: 0, pending: null };
+
+    async function readHealthResults() {
+      const root = 'https://api.github.com/repos/adminhostipd32-svg/KasIPD32/actions';
+      async function read(path) {
+        const response = await fetch(root + path, {
+          credentials: 'omit', signal: AbortSignal.timeout(15000),
+          headers: { Accept: 'application/vnd.github+json' },
+        });
+        if (!response.ok) throw new Error('GitHub HTTP ' + response.status);
+        return response.json();
+      }
+      const { workflow_runs } = await read('/workflows/cek-supabase-kas.yml/runs?branch=main&per_page=5');
+      const results = healthTargets.map(() => ({ latest: '', check: null }));
+      for (const [index, run] of workflow_runs.entries()) {
+        const { jobs } = await read('/runs/' + run.id + '/jobs?filter=latest');
+        healthTargets.forEach((target, i) => {
+          const row = results[i];
+          const job = jobs.find(j => j.name === target.job || (i === 0 && j.name === 'cek-database'));
+          const step = job?.steps?.find(s => s.name.startsWith('Periksa akses baca ke periode kas'));
+          if (index === 0) {
+            if (run.status !== 'completed' && (!job || job.status !== 'completed')) row.latest = 'Pemeriksaan berikutnya sedang berjalan atau menunggu giliran.';
+            else if (!step || !['success','failure','timed_out'].includes(step.conclusion)) row.latest = 'Run terbaru belum menghasilkan pemeriksaan database.';
+          }
+          if (!row.check && step?.completed_at && ['success','failure','timed_out'].includes(step.conclusion)) {
+            row.check = { ok: step.conclusion === 'success', time: step.completed_at };
+          }
+        });
+        if (results.every(row => row.check)) break;
+      }
+      return results;
+    }
+
+    class DatabaseCheckPanel extends HTMLElement {
+      connectedCallback() { this.refresh(); }
+      async refresh(force = false) {
+        if (State.session?.role !== 'it_support') return;
+        const draw = (busy, error = '') => {
+          if (!this.isConnected || State.session?.role !== 'it_support') return;
+          this.innerHTML = `<section class="glass-card rounded-2xl p-5 space-y-4"><header class="flex flex-wrap justify-between items-center gap-3">
+            <div><h2 class="font-bold text-slate-900">Pengecekan database</h2><p class="text-xs text-slate-500">GitHub Actions · Jadwal 07.17, 15.17, dan 23.17 WIB</p></div>
+            <button type="button" ${busy?'disabled':''} class="rounded-xl border px-3 py-2 text-xs font-semibold" onclick="this.closest('database-check-panel').refresh(true)">${busy?'Memuat…':'Muat status terbaru'}</button></header>
+            ${error?`<p role="status" class="text-sm text-amber-800">Status terbaru belum bisa dimuat. ${escapeHtml(error)}${healthCache.results?' · Menampilkan hasil terakhir yang tersimpan.':''}</p>`:''}
+            <div class="grid gap-3 sm:grid-cols-2">${healthTargets.map((target,i)=>{
+              const row = healthCache.results?.[i], check = row?.check;
+              const time = check ? new Date(check.time).toLocaleString('id-ID',{timeZone:'Asia/Jakarta',dateStyle:'long',timeStyle:'medium'})+' WIB' : '';
+              return `<div class="rounded-xl border border-slate-200 p-4"><div class="flex justify-between gap-2 items-center"><h3 class="font-bold">${target.label}</h3>
+                <span class="rounded-full px-2.5 py-1 text-xs font-bold ${check?(check.ok?'bg-emerald-50 text-emerald-800':'bg-rose-50 text-rose-800'):'bg-slate-100 text-slate-600'}">${check?(check.ok?'Berhasil':'Gagal'):'Belum tersedia'}</span></div>
+                <p class="mt-2 text-sm text-slate-600">${time?'Terakhir diperiksa · '+time:busy?'Memuat waktu pemeriksaan…':'Belum ada waktu pemeriksaan yang tersedia.'}</p>
+                ${row?.latest?`<p class="mt-1 text-xs text-slate-500">${row.latest}</p>`:''}</div>`;
+            }).join('')}</div></section>`;
+        };
+        if (!force && healthCache.results && Date.now()-healthCache.fetchedAt < 60000) { draw(false); return; }
+        draw(true);
+        try {
+          healthCache.pending ??= readHealthResults().then(results=>{
+            healthCache.results=results; healthCache.fetchedAt=Date.now();
+          }).finally(()=>{ healthCache.pending=null; });
+          await healthCache.pending;
+          draw(false);
+        } catch(err) { draw(false,err.message); }
+      }
+    }
+    customElements.define('database-check-panel', DatabaseCheckPanel);
+
     function renderTabSupabase() {
       if (State.session?.role !== 'it_support') return '';
-      return `<section class="glass-card rounded-2xl p-5 space-y-4">
+      return `<database-check-panel class="block mb-4"></database-check-panel><section class="glass-card rounded-2xl p-5 space-y-4">
         <h2 class="font-bold">Sistem &amp; Backup</h2>
         <p>Lingkungan: ${DB.mode === 'demo' ? 'DEMO' : isProduction ? 'PROD' : 'DEV'}</p>
         <button class="btn px-3 py-2 border rounded-xl" onclick="exportBackupJson()">Unduh backup JSON</button>

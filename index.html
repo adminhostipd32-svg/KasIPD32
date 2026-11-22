@@ -312,6 +312,38 @@ revoke all on function public.posting_patungan(uuid,date) from public, anon;
 grant execute on function public.posting_patungan(uuid,date) to authenticated;
 
 
+create or replace function public.buat_patungan_dengan_anggota(p_id uuid, p_acara jsonb, p_anggota uuid[])
+returns uuid language plpgsql security invoker set search_path = '' as $$
+declare
+  saved uuid;
+  expected integer;
+  added integer;
+  rate bigint := (p_acara->>'tarif_default')::bigint;
+begin
+  if nullif(trim(p_acara->>'nama_event'),'') is null or rate is null or rate < 0 then
+    raise exception 'Nama acara dan tarif yang valid diperlukan.';
+  end if;
+  insert into public.patungan_event
+    (id,nama_event,tahun,status,tarif_default,total_pengeluaran,subsidi_kas,catatan_tarif,keterangan)
+  values (p_id,trim(p_acara->>'nama_event'),(p_acara->>'tahun')::int,p_acara->>'status',
+    rate,(p_acara->>'total_pengeluaran')::bigint,(p_acara->>'subsidi_kas')::bigint,
+    p_acara->>'catatan_tarif',p_acara->>'keterangan')
+  on conflict (id) do nothing returning id into saved;
+  if saved is null then return p_id; end if;
+  select count(distinct item) into expected from unnest(p_anggota) as u(item);
+  insert into public.patungan_peserta
+    (patungan_id,anggota_id,nama_peserta,tarif_target,nominal_bayar,status_bayar,keterangan)
+  select saved,a.id,a.nama,rate,0,case when rate=0 then 'Lunas' else 'Belum Bayar' end,a.peran
+  from public.anggota a where a.id=any(p_anggota);
+  get diagnostics added = row_count;
+  if added <> expected then raise exception 'Daftar anggota berubah. Muat ulang dan periksa pilihan peserta.'; end if;
+  return saved;
+end;
+$$;
+revoke all on function public.buat_patungan_dengan_anggota(uuid,jsonb,uuid[]) from public, anon;
+grant execute on function public.buat_patungan_dengan_anggota(uuid,jsonb,uuid[]) to authenticated;
+
+
 -- ROW LEVEL SECURITY (RLS) UNTUK HYBRID AUTH
 -- Anggota (Anon / Login via Tabel) -> READ ONLY
 -- Admin (Supabase Auth Authenticated) -> FULL CRUD
@@ -1157,6 +1189,9 @@ ON CONFLICT (username) DO NOTHING;
       // Filters
       selectedYear: 2026,
       reportMonth: 0,
+      reportYear: null,
+      personalYear: 0,
+      masterYear: 0,
       iuranSearch: '',
       iuranStatusFilter: 'Semua',
       txYearFilter: '2026',
@@ -1697,47 +1732,10 @@ ON CONFLICT (username) DO NOTHING;
         .slice(0, 6);
 
       // Kartu status iuran pribadi jika login sebagai Anggota
-      let personalCardHtml = '';
-      if (!isAdmin() && State.session?.id) {
-        const myIuran = State.data.iuran_kas.filter(
-          (i) => i.anggota_id === State.session.id && Number(i.tahun) === activeYr && Number(i.nominal) > 0
-        );
-        const myTotal = myIuran.reduce((a, b) => a + Number(b.nominal), 0);
-        const myLebih = State.data.saldo_lebih_bayar.find(
-          (l) => l.anggota_id === State.session.id && Number(l.tahun) === activeYr
-        );
-        const member = activeMembers.find(m => m.id === State.session.id);
-        const due = member ? memberDues(member, activeYr, tarifActive) : [];
-        const belumBulan = due.filter(m => m.remaining > 0);
-
-        personalCardHtml = `
-          <div class="glass-card rounded-2xl p-5 mb-6 border-l-4 border-l-teal-700 animate-fade-up">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div>
-                <div class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-teal-50 text-teal-700 text-xs font-bold mb-2">
-                  <i data-lucide="user-check" class="w-3.5 h-3.5"></i>
-                  <span>Status Iuran Pribadi • ${activeYr}</span>
-                </div>
-                <h2 class="text-lg font-bold text-slate-900">Halo, ${escapeHtml(State.session.nama)}</h2>
-                <p class="text-sm text-slate-600 mt-0.5">
-                  Setoran tercatat untuk <b>${myIuran.length} bulan</b> (${formatRp(myTotal)})
-                  ${myLebih && myLebih.nominal > 0 ? `• Lebih Bayar: <b class="text-emerald-700">${formatRp(myLebih.nominal)}</b>` : ''}.
-                </p>
-              </div>
-              <div class="flex flex-wrap items-center gap-2">
-                ${
-                  !due.length ? '' : belumBulan.length === 0
-                    ? `<span class="rounded-xl bg-emerald-50 p-2 text-xs font-bold">Lunas s.d. ${due[due.length - 1].short}</span>`
-                    : `<span class="rounded-xl bg-amber-50 p-2 text-xs font-bold">Kurang ${formatRp(belumBulan.reduce((sum, m) => sum + m.remaining, 0))} • ${belumBulan.map(m => m.short).join(', ')}</span>`
-                }
-                <button onclick="navigateTo('iuran')" class="px-3.5 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold transition">
-                  Lihat Matriks
-                </button>
-              </div>
-            </div>
-          </div>
-        `;
-      }
+      const personalMember = !isAdmin() && State.data.anggota.find(m=>m.id===State.session?.id);
+      const inPersonalPeriod = row => row.anggota_id===State.session?.id && (!State.personalYear || Number(row.tahun)===State.personalYear);
+      const receipts = personalMember ? State.data.iuran_kas.filter(inPersonalPeriod).reduce((sum,row)=>sum+Number(row.nominal),0) : 0;
+      const overpaid = personalMember ? State.data.saldo_lebih_bayar.filter(inPersonalPeriod).reduce((sum,row)=>sum+Number(row.nominal),0) : 0;
 
       const maxBarVal = Math.max(1, ...recap.rows.map((r) => Math.max(r.totalMasuk, r.totalKeluar)));
 
@@ -1767,8 +1765,7 @@ ON CONFLICT (username) DO NOTHING;
             </div>
           </div>
 
-          ${personalCardHtml}
-          ${!isAdmin() ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.session.id),activeYr) : ''}
+          ${personalMember ? `<section class="space-y-3"><div class="flex flex-wrap gap-3 items-center justify-between"><h2 class="text-lg font-bold">Tagihan saya</h2><label class="text-sm">Tahun <select id="personal-year" class="border rounded-xl p-2" onchange="State.personalYear=Number(this.value);renderApp()">${yearOptions(State.personalYear)}</select></label></div><div class="flex flex-wrap gap-3 items-center justify-between text-xs text-slate-600"><span>Setoran iuran ${formatRp(receipts)} · Lebih bayar ${formatRp(overpaid)}</span><button class="rounded-xl px-3 py-2 bg-teal-50 text-teal-800 font-bold" onclick="if(State.personalYear)State.selectedYear=State.personalYear;navigateTo('iuran')">Lihat Matriks</button></div>${memberBalanceCard(personalMember,State.personalYear)}</section>` : ''}
 
           <!-- 4 KPI Cards -->
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
@@ -2022,8 +2019,7 @@ ON CONFLICT (username) DO NOTHING;
         .map(m => ({ ...m, remaining: Math.max(0, rate - (paid.get(m.num) || 0)) }));
     }
 
-    function memberBalanceCard(member,year,throughMonth=12) {
-      if (!member) return '';
+    function memberBalanceForYear(member,year,throughMonth) {
       const status = membershipForYear(member,year);
       const rate=getTarifForYear(year);
       let months=status ? memberDues(member,year,rate,new Date(year,11,31)).filter(m=>m.num<=throughMonth) : [];
@@ -2038,15 +2034,44 @@ ON CONFLICT (username) DO NOTHING;
         }
       }
       const now=new Date();
-      const pending=months.filter(m=>m.remaining>0).map(m=>[m.full,year>now.getFullYear() || (year===now.getFullYear()&&m.num>now.getMonth()+1)?'Belum jatuh tempo':'Belum lunas',formatRp(m.remaining)]);
-      const events=new Map(State.data.patungan_event.filter(e=>Number(e.tahun)===year).map(e=>[e.id,e.nama_event]));
-      const participants=State.data.patungan_peserta.filter(p=>p.anggota_id===member.id && events.has(p.patungan_id));
-      const unpaid=participants.filter(p=>Number(p.tarif_target)>Number(p.nominal_bayar)).map(p=>[events.get(p.patungan_id),formatRp(p.nominal_bayar),formatRp(Number(p.tarif_target)-Number(p.nominal_bayar))]);
-      return `<section class="space-y-3"><h3 class="font-bold text-slate-900">${escapeHtml(member.nama)} · ${year}</h3><p class="text-xs text-slate-500">Iuran sampai ${MONTHS[throughMonth-1].full} ${year}. Patungan mencakup seluruh acara tahun ${year}.</p>
-        ${reportTable('Iuran yang belum lunas',['Bulan','Status','Sisa'],pending,'Tidak ada sisa iuran pada bulan yang diperhitungkan.')}
-        ${note?`<p class="text-xs text-slate-500">${note}</p>`:''}
-        ${reportTable('Patungan yang belum lunas',['Acara','Sudah bayar','Sisa'],unpaid,'Tidak ada sisa tagihan dari peserta yang terhubung ke anggota ini.')}
-        <p class="text-xs text-slate-500">Patungan mengikuti tahun acara dan keanggotaan peserta yang tercatat.</p></section>`;
+      const pending = months.filter(m=>m.remaining>0).map(m=>({
+        ...m, target:rate, paid:rate-m.remaining,
+        future:year>now.getFullYear() || (year===now.getFullYear() && m.num>now.getMonth()+1)
+      }));
+      const events = new Map(State.data.patungan_event.filter(e=>Number(e.tahun)===year).map(e=>[e.id,e.nama_event]));
+      const unpaid = State.data.patungan_peserta.filter(p=>p.anggota_id===member.id && events.has(p.patungan_id) && Number(p.tarif_target)>Number(p.nominal_bayar))
+        .map(p=>({name:events.get(p.patungan_id),target:Number(p.tarif_target),paid:Number(p.nominal_bayar),remaining:Number(p.tarif_target)-Number(p.nominal_bayar)}));
+      return {year,pending,unpaid,note};
+    }
+
+    function yearOptions(year) {
+      return `<option value="0" ${!year?'selected':''}>Semua tahun</option>`+getAvailableYears().map(y=>`<option value="${y}" ${y===year?'selected':''}>${y}</option>`).join('');
+    }
+
+    function memberBalanceCard(member, year, throughMonth = 12) {
+      if (!member) return '';
+      const years = year ? [year] : getAvailableYears();
+      const periods = years.map(y => memberBalanceForYear(member,y,throughMonth));
+      const sum = (rows,key) => rows.reduce((total,row)=>total+row[key],0);
+      const yearly = periods.map(p=>{
+        const dues = sum(p.pending,'remaining');
+        const future = sum(p.pending.filter(m=>m.future),'remaining');
+        const events = sum(p.unpaid,'remaining');
+        return {year:p.year, dues, future, events, total:dues+events};
+      });
+      const total = sum(yearly,'total');
+      const future = sum(yearly,'future');
+      const cues = [['Sisa iuran',sum(yearly,'dues')],['Sisa patungan',sum(yearly,'events')],['Total belum dibayar',total],['Iuran belum jatuh tempo',future]];
+      const details = periods.flatMap(p=>[
+        ...p.pending.map(m=>[p.year,'Iuran',m.full,m.future?'Belum jatuh tempo':'Belum lunas',formatRp(m.target),formatRp(m.paid),formatRp(m.remaining)]),
+        ...p.unpaid.map(e=>[p.year,'Patungan',e.name,'Belum lunas',formatRp(e.target),formatRp(e.paid),formatRp(e.remaining)])
+      ]);
+      return `<section class="space-y-4"><h3 class="font-bold text-slate-900">${escapeHtml(member.nama)} · ${year||'Semua tahun'}</h3>
+        <div class="grid grid-cols-2 xl:grid-cols-4 gap-3">${cues.map(([label,v])=>`<div class="glass-card rounded-2xl p-4"><p class="text-xs text-slate-500">${label}</p><strong class="text-lg tabular-nums">${formatRp(v)}</strong></div>`).join('')}</div>
+        <p class="text-xs text-slate-500">Total mencakup iuran sampai ${MONTHS[throughMonth-1].full}, termasuk bulan mendatang, serta sisa patungan tahun acara.</p>
+        ${reportTable('Rekap per tahun',['Tahun','Sisa iuran','Sisa patungan','Total belum dibayar'],yearly.filter(y=>y.total>0).map(y=>[y.year,formatRp(y.dues),formatRp(y.events),formatRp(y.total)]),'Tidak ada sisa tagihan yang tercatat.')}
+        ${reportTable('Rincian tagihan',['Tahun','Jenis','Bulan / acara','Status','Target','Dibayar','Sisa'],details,'Tidak ada rincian tagihan pada periode ini.')}
+        ${periods.filter(p=>p.note).map(p=>`<p class="text-xs text-slate-500">${p.year} · ${p.note}</p>`).join('')}</section>`;
     }
 
     function reportTable(title, headers, rows, empty = '', cellAction = null) {
@@ -2067,8 +2092,9 @@ ON CONFLICT (username) DO NOTHING;
 
     function renderReportPage() {
       if (!isAdmin()) return '';
-      const year = Number(State.selectedYear);
-      const month = State.reportMonth;
+      const reportYear = State.reportYear ?? Number(State.selectedYear);
+      const year = reportYear || getAvailableYears().at(-1);
+      const month = reportYear ? State.reportMonth : 0;
       const annual = computeAnnualRecap().rows.find(r => r.tahun === year);
       if (!annual || !State.data.periode_kas.length) return '<p>Data periode kas belum tersedia.</p>';
       const total = records => records.reduce((sum, r) => sum + Number(r.nominal || 0), 0);
@@ -2097,7 +2123,7 @@ ON CONFLICT (username) DO NOTHING;
         categories.set(key, (categories.get(key) || 0) + Number(row.nominal));
       }
       const events = State.data.patungan_event.filter(e => Number(e.tahun) === year);
-      const periodLabel = `${month ? MONTHS[month - 1].full : 'Tahun'} ${year}`;
+      const periodLabel = reportYear ? `${month ? MONTHS[month - 1].full : 'Tahun'} ${year}` : 'Semua tahun';
       const selectStyle = 'rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 focus:ring-2 focus:ring-teal-600/25';
       return `<div class="space-y-5 animate-fade-up">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -2106,13 +2132,13 @@ ON CONFLICT (username) DO NOTHING;
           <button class="inline-flex items-center justify-center gap-2 self-start sm:self-auto px-4 py-2.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm transition active:scale-[0.98]" onclick="printMemberReport()"><i data-lucide="printer" class="w-4 h-4"></i>Cetak / Simpan PDF</button>
         </div>
         <div class="glass-card rounded-2xl p-4 grid grid-cols-2 sm:flex sm:items-end gap-3">
-          <label class="grid gap-1.5 text-xs font-semibold text-slate-500">Tahun<select class="${selectStyle}" onchange="State.selectedYear=Number(this.value);renderApp()">${getAvailableYears().map(y => `<option ${year===y?'selected':''}>${y}</option>`).join('')}</select></label>
-          <label class="grid gap-1.5 text-xs font-semibold text-slate-500">Periode<select class="${selectStyle}" onchange="State.reportMonth=Number(this.value);renderApp()"><option value="0">Tahunan</option>${MONTHS.map(m=>`<option value="${m.num}" ${month===m.num?'selected':''}>${m.full}</option>`).join('')}</select></label>
+          <label class="grid gap-1.5 text-xs font-semibold text-slate-500">Tahun<select class="${selectStyle}" id="report-year" onchange="State.reportYear=Number(this.value);renderApp()">${yearOptions(reportYear)}</select></label>
+          <label class="grid gap-1.5 text-xs font-semibold text-slate-500">Periode<select class="${selectStyle}" ${reportYear ? '' : 'disabled'} onchange="State.reportMonth=Number(this.value);renderApp()"><option value="0">Tahunan</option>${MONTHS.map(m=>`<option value="${m.num}" ${month===m.num?'selected':''}>${m.full}</option>`).join('')}</select></label>
           <label class="grid gap-1.5 text-xs font-semibold text-slate-500 col-span-2">Jenis laporan<select class="${selectStyle}" onchange="State.reportMember=this.value;renderApp()"><option value="">Rekap kas bersama</option>${State.data.anggota.map(m=>`<option value="${escapeHtml(m.id)}" ${State.reportMember===m.id?'selected':''}>Tagihan · ${escapeHtml(m.nama)}</option>`).join('')}</select></label>
         </div>
         <article id="member-report" class="space-y-4">
         <header class="hidden"><h2>Laporan Kas IPD 32</h2><p>${periodLabel} · Disusun ${new Date().toLocaleDateString('id-ID')}</p></header>
-        ${State.reportMember ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.reportMember),year,month||12) : `<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">${summary.map(([label,v,icon,tone])=>`<div class="glass-card rounded-2xl p-3 sm:p-5 min-w-0">
+        ${State.reportMember ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.reportMember),reportYear,month||12) : !reportYear ? reportTable('Rekap kas semua tahun',['Tahun','Pemasukan','Pengeluaran','Saldo tahun','Saldo kumulatif'],computeAnnualRecap().rows.map(r=>[r.tahun,formatRp(r.totalMasuk),formatRp(r.totalKeluar),formatRp(r.saldoTahun),formatRp(r.saldoKumulatif)])) : `<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">${summary.map(([label,v,icon,tone])=>`<div class="glass-card rounded-2xl p-3 sm:p-5 min-w-0">
           <div class="flex items-center justify-between gap-1 mb-3"><span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">${label}</span>
           <span aria-hidden="true" class="w-7 h-7 sm:w-9 sm:h-9 shrink-0 rounded-xl flex items-center justify-center ${tone}"><i data-lucide="${icon}" class="w-4 h-4"></i></span></div>
           <strong class="text-base sm:text-xl xl:text-2xl font-extrabold tabular-nums ${v < 0 ? 'text-rose-700' : 'text-slate-900'}">${formatRp(v)}</strong></div>`).join('')}</div>
@@ -2129,7 +2155,7 @@ ON CONFLICT (username) DO NOTHING;
       const preview = window.open('', '_blank');
       if (!preview) return showToast('Izinkan jendela cetak untuk menyimpan PDF.', 'error');
       const doc = preview.document;
-      doc.title = `Laporan Kas IPD 32 - ${State.reportMonth ? MONTHS[State.reportMonth - 1].full : 'Tahunan'} ${State.selectedYear}`;
+      doc.title = 'Laporan Kas IPD 32 - ' + report.querySelector('header p').textContent.split(' · ')[0];
       doc.documentElement.lang = 'id';
       const style = doc.createElement('style');
       style.textContent = '@page{size:A4;margin:14mm}body{font:11pt Arial;color:#173536}h2,h3{break-after:avoid}article>.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}table{width:100%;border-collapse:collapse}th,td{padding:5px;border-bottom:1px solid #ccc;text-align:right}th:first-child,td:first-child{text-align:left}th button{all:unset}tr{break-inside:avoid}p{margin:8px 0}';
@@ -3201,6 +3227,29 @@ ON CONFLICT (username) DO NOTHING;
       `;
     }
 
+    function eventMembers(year) {
+      return State.data.anggota.filter(m=>membershipForYear(m,year)==='Aktif');
+    }
+
+    function renderEventPicker() {
+      const picker=document.getElementById('event-members');
+      if (!picker) return;
+      const checked=new Set(Array.from(picker.querySelectorAll('input:checked'),input=>input.value));
+      const year=Number(document.getElementById('pe-tahun').value);
+      const members=eventMembers(year);
+      picker.innerHTML=members.map(m=>`<label class="flex items-center gap-2 p-2 text-sm"><input type="checkbox" value="${escapeHtml(m.id)}" ${checked.has(m.id)?'checked':''}>${escapeHtml(m.nama)}</label>`).join('') || '<p class="p-2 text-sm">Tidak ada anggota aktif pada tahun ini.</p>';
+      updateEventCount();
+    }
+
+    function updateEventCount() {
+      document.getElementById('event-count').textContent=document.querySelectorAll('#event-members input:checked').length+' peserta dipilih';
+    }
+
+    function selectEventMembers(selected) {
+      document.querySelectorAll('#event-members input').forEach(input=>{input.checked=selected;});
+      updateEventCount();
+    }
+
     function openPatunganModal(editId = null) {
       if (!isAdmin()) return;
       const ev = editId ? State.data.patungan_event.find((e) => e.id === editId) : null;
@@ -3209,7 +3258,7 @@ ON CONFLICT (username) DO NOTHING;
           <h3 class="text-base font-bold text-slate-900">${ev ? 'Edit Event Patungan' : 'Buat Event Patungan Baru'}</h3>
           <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
         </div>
-        <form onsubmit="savePatunganEvent(event, '${editId || ''}')" class="p-5 space-y-4">
+        <form data-event-id="${ev?.id || generateUuid()}" onsubmit="savePatunganEvent(event, '${editId || ''}')" class="p-5 space-y-4 overflow-y-auto">
           <div>
             <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nama Event / Acara</label>
             <input id="pe-nama" type="text" required value="${escapeHtml(ev?.nama_event || '')}" placeholder="Contoh: Perpisahan Ns. Budi"
@@ -3218,7 +3267,7 @@ ON CONFLICT (username) DO NOTHING;
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tahun</label>
-              <input id="pe-tahun" type="number" required value="${ev?.tahun || State.selectedYear}"
+              <input id="pe-tahun" type="number" onchange="renderEventPicker()" required value="${ev?.tahun || State.selectedYear}"
                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold tabular-nums" />
             </div>
             <div>
@@ -3254,16 +3303,27 @@ ON CONFLICT (username) DO NOTHING;
             <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Keterangan Acara</label>
             <textarea id="pe-ket" rows="2" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm">${escapeHtml(ev?.keterangan || '')}</textarea>
           </div>
+          ${ev?'':`<fieldset class="space-y-2"><legend class="font-bold text-sm">Peserta anggota ruangan</legend>
+            <div class="flex flex-wrap gap-2"><button type="button" onclick="selectEventMembers(true)" class="text-xs bg-teal-50 text-teal-800 rounded-xl px-3 py-2">Tambahkan semua anggota aktif</button><button type="button" onclick="selectEventMembers(false)" class="text-xs px-2">Kosongkan pilihan</button></div>
+            <div id="event-members" onchange="updateEventCount()" class="max-h-40 overflow-y-auto border rounded-xl grid sm:grid-cols-2"></div>
+            <p id="event-count" aria-live="polite" class="text-xs font-bold text-teal-700"></p>
+            <p class="text-xs text-slate-500">Peserta terpilih memakai tarif default. Dokter tamu dapat ditambahkan melalui Tambah Peserta setelah acara disimpan, dengan tarif tersendiri.</p></fieldset>`}
           <div class="flex justify-end gap-2 pt-3 border-t border-slate-200">
             <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200">Batal</button>
             <button type="submit" class="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 shadow-sm">Simpan Event</button>
           </div>
         </form>
-      `, 'max-w-md');
+      `, 'max-w-lg');
+      if (!ev) renderEventPicker();
     }
 
     async function savePatunganEvent(e, editId) {
       e.preventDefault();
+      if (!isAdmin()) return;
+      const form=e.currentTarget;
+      const submit=form.querySelector('[type="submit"]');
+      if (submit.disabled) return;
+      submit.disabled=true;
       const payload = {
         nama_event: document.getElementById('pe-nama').value.trim(),
         tahun: Number(document.getElementById('pe-tahun').value),
@@ -3279,13 +3339,28 @@ ON CONFLICT (username) DO NOTHING;
           await DB.updateRow('patungan_event', editId, payload);
           showToast('Event patungan diperbarui.', 'success');
         } else {
-          const created = await DB.insertRow('patungan_event', { ...payload, terposting_ke_kas: false });
-          State.activePatunganId = created.id;
+          const id=form.dataset.eventId;
+          const ids=Array.from(form.querySelectorAll('#event-members input:checked'),input=>input.value);
+          if (DB.mode==='supabase') {
+            const {error}=await DB.client.rpc('buat_patungan_dengan_anggota',{p_id:id,p_acara:payload,p_anggota:ids});
+            if(error) throw error;
+          } else {
+            const data=DB.getDemoStore();
+            if (!data.patungan_event.some(ev=>ev.id===id)) {
+              const members=data.anggota.filter(m=>ids.includes(m.id));
+              if(members.length!==ids.length) throw Error('Daftar anggota berubah. Periksa pilihan peserta.');
+              data.patungan_event.push({...payload,id,terposting_ke_kas:false});
+              data.patungan_peserta.push(...members.map(m=>({id:generateUuid(),patungan_id:id,anggota_id:m.id,nama_peserta:m.nama,keterangan:m.peran,tarif_target:payload.tarif_default,nominal_bayar:0,status_bayar:payload.tarif_default?'Belum Bayar':'Lunas'})));
+              DB.saveDemoStore(data);
+            }
+          }
+          State.activePatunganId = id;
           showToast('Event patungan berhasil dibuat.', 'success');
         }
         closeModal();
         await refreshData(true);
       } catch (err) {
+        submit.disabled=false;
         showToast('Gagal menyimpan event: ' + err.message, 'error');
       }
     }
@@ -3317,8 +3392,8 @@ ON CONFLICT (username) DO NOTHING;
       const existingIds = new Set(
         State.data.patungan_peserta.filter((p) => p.patungan_id === eventId && p.anggota_id).map((p) => p.anggota_id)
       );
-      const toAdd = State.data.anggota
-        .filter((a) => a.status === 'Aktif' && !existingIds.has(a.id))
+      const toAdd = eventMembers(Number(ev.tahun))
+        .filter((a) => !existingIds.has(a.id))
         .map((a) => ({
           patungan_id: eventId,
           anggota_id: a.id,
@@ -3537,9 +3612,9 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function renderTabAnggota() {
-      const members = State.data.anggota;
+      const members = State.masterYear ? State.data.anggota.map(m=>({...m,status:membershipForYear(m,State.masterYear)})).filter(m=>m.status) : State.data.anggota;
       const q = State.memberSearch.trim().toLowerCase();
-      const list = State.data.anggota.filter(
+      const list = members.filter(
         (m) => !q || m.nama.toLowerCase().includes(q) || m.username.toLowerCase().includes(q)
       );
 
@@ -3547,6 +3622,7 @@ ON CONFLICT (username) DO NOTHING;
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">${[['Total anggota',members.length],...['Aktif','Resign','Mutasi / Pindah'].map(label=>[label,members.filter(m=>label==='Mutasi / Pindah'?['Mutasi','Pindah'].includes(m.status):m.status===label).length])].map(([label,count])=>`<div class="glass-card rounded-2xl p-4"><p class="text-xs text-slate-500">${label}</p><strong class="text-xl">${count}</strong></div>`).join('')}</div>
         <div class="glass-card rounded-2xl overflow-hidden">
           <div class="p-4 sm:p-5 border-b border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <label class="text-xs font-semibold text-slate-600">Tahun keanggotaan <select id="master-year" class="rounded-xl border p-2" onchange="State.masterYear=Number(this.value);renderApp()">${yearOptions(State.masterYear)}</select></label>
             <div class="relative sm:w-72">
               <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
               <input type="text" value="${escapeHtml(State.memberSearch)}" id="memberSearch" oninput="updateSearch(this)"

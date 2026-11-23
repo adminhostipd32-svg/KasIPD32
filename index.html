@@ -1068,7 +1068,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
         .slice(0, 6);
 
       // Kartu status iuran pribadi jika login sebagai Anggota
-      const personalMember = !isAdmin() && State.data.anggota.find(m=>m.id===State.session?.id);
+      const personalMember = State.session?.role==='anggota' && State.data.anggota.find(m=>m.id===State.session?.id);
       const inPersonalPeriod = row => row.anggota_id===State.session?.id && (!State.personalYear || Number(row.tahun)===State.personalYear);
       const receipts = personalMember ? State.data.iuran_kas.filter(inPersonalPeriod).reduce((sum,row)=>sum+Number(row.nominal),0) : 0;
       const overpaid = personalMember ? State.data.saldo_lebih_bayar.filter(inPersonalPeriod).reduce((sum,row)=>sum+Number(row.nominal),0) : 0;

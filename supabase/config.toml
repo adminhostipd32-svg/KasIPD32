@@ -1,0 +1,3 @@
+[functions.akun-anggota]
+# Login validates the password with Auth. Activation validates a single-use code.
+verify_jwt = false

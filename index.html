@@ -804,7 +804,6 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                   <i data-lucide="log-in" class="w-4 h-4"></i>
                   <span>Masuk</span>
                 </button>
-                <details class="text-sm text-teal-800"><summary class="cursor-pointer font-semibold">Aktivasi anggota / lupa kata sandi</summary><p class="my-2 text-slate-600">Minta kode pribadi kepada pengurus. Masukkan username, kata sandi baru minimal 10 karakter, dan kode di bawah, lalu pilih Masuk.</p><label>Kode pribadi<input id="login-code" class="w-full border rounded-xl p-2 mt-1" autocomplete="off"></label></details>
               </form>
 
 
@@ -836,7 +835,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
       }
 
       try {
-        const session = await loginKas(identifier.trim(),password,document.getElementById('login-code')?.value.trim());
+        const session = await loginKas(identifier.trim(),password);
 
         State.session = session;
         State.dashboardScope = 'personal';
@@ -959,8 +958,8 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                 </div>
               </div>
             </div>
-            <button
-              onclick="handleLogout()"
+            ${State.session.role==='anggota'?`<button class="w-full text-sm text-teal-700 py-2" onclick="passwordAnggota()">Ganti kata sandi</button>`:''}
+            <button onclick="handleLogout()"
               class="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 transition active:scale-[0.98]">
               <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
               <span>Keluar Aplikasi</span>
@@ -987,6 +986,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
               <button onclick="refreshData()" title="Muat Ulang" class="p-2 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
               </button>
+              ${State.session.role==='anggota'?`<button class="text-xs font-semibold text-teal-700 px-2 py-2" onclick="passwordAnggota()">Ganti kata sandi</button>`:''}
               <button onclick="handleLogout()" title="Keluar" class="p-2 rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-100">
                 <i data-lucide="log-out" class="w-4 h-4"></i>
               </button>
@@ -1471,7 +1471,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
       const selectStyle = 'rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 focus:ring-2 focus:ring-teal-600/25';
       return `<div class="space-y-5 animate-fade-up">
         <div class="report-banner ${State.reportMember?'personal-banner':'general-banner'}">
-          <div><h1>Laporan Anggota</h1><p>${State.reportMember?'Tagihan per anggota':'Draf rekap kas ruangan'} · ${periodLabel}</p></div>
+          <div><h1>Laporan Anggota</h1><p>${State.reportMember?'Tagihan per anggota':'Rekap kas ruangan'} · ${periodLabel}</p></div>
           <button class="inline-flex items-center justify-center gap-2 self-start sm:self-auto px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 text-teal-900 text-xs font-bold shadow-sm transition active:scale-[0.98]" onclick="printMemberReport()"><i data-lucide="printer" class="w-4 h-4"></i>Cetak / Simpan PDF</button>
         </div>
         <div class="glass-card rounded-2xl p-4 grid grid-cols-2 sm:flex sm:items-end gap-3">
@@ -1480,7 +1480,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
           <label class="grid gap-1.5 text-xs font-semibold text-slate-500 col-span-2">Jenis laporan<select class="${selectStyle}" onchange="State.reportMember=this.value;renderApp()"><option value="">Rekap kas bersama</option>${State.data.anggota.map(m=>`<option value="${escapeHtml(m.id)}" ${State.reportMember===m.id?'selected':''}>Tagihan · ${escapeHtml(m.nama)}</option>`).join('')}</select></label>
         </div>
         <article id="member-report" class="space-y-4">
-        <header class="hidden"><h2>Draf laporan kas IPD 32</h2><p>${periodLabel} · Disusun ${new Date().toLocaleDateString('id-ID')}</p></header>
+        <header class="hidden"><h2>Laporan kas IPD 32</h2><p>${periodLabel} · Disusun ${new Date().toLocaleDateString('id-ID')}</p></header>
         ${State.reportMember ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.reportMember),reportYear,month||12) : !reportYear ? reportTable('Rekap kas semua tahun',['Tahun','Pemasukan','Pengeluaran','Saldo tahun','Saldo kumulatif'],computeAnnualRecap().rows.map(r=>[r.tahun,formatRp(r.totalMasuk),formatRp(r.totalKeluar),formatRp(r.saldoTahun),formatRp(r.saldoKumulatif)])) : `<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">${summary.map(([label,v,icon,tone])=>`<div class="report-tile ${tone}">
           <div class="flex items-center justify-between gap-1 mb-3"><span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">${label}</span>
           <span aria-hidden="true" class="w-7 h-7 sm:w-9 sm:h-9 shrink-0 rounded-xl flex items-center justify-center ${tone}"><i data-lucide="${icon}" class="w-4 h-4"></i></span></div>
@@ -3073,7 +3073,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                     </td>
                     <td class="py-3 px-4 text-xs">
                       <span class="px-2 py-0.5 rounded bg-slate-100 font-mono text-slate-700">${escapeHtml(m.username)}</span>
-                      <button class="text-teal-700 font-semibold ml-2" onclick="memberCode('${m.id}')">Kode akses</button>
+                      ${isAdmin()?`<button class="text-teal-700 font-semibold ml-2" onclick="passwordAnggota('${m.id}')">Ganti kata sandi</button>`:''}
                     </td>
                     <td class="py-3 px-4">
                       <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${

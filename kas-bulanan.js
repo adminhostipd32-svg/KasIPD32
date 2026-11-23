@@ -43,29 +43,6 @@ function clearKasSession() {
   closeModal();
 }
 
-function passwordAnggota(id) {
-  const self=!id;
-  const member=State.data.anggota.find(m=>m.id===(id||State.session.id));
-  if(!member || (self?State.session.role!=='anggota':!isAdmin()))return;
-  openModal(`<form id="ubah-password" class="p-5 space-y-4"><h2 class="text-lg font-bold">Ganti kata sandi</h2><p>${escapeHtml(member.nama)} · ${escapeHtml(member.username)}</p>
-    ${self?`<label class="block">Kata sandi sekarang<input name="lama" type="password" autocomplete="current-password" required class="${fieldStyle}"></label>`:''}
-    <label class="block">Kata sandi baru<input name="baru" type="password" autocomplete="new-password" required class="${fieldStyle}"></label>
-    <p class="text-xs text-slate-600">Gunakan minimal 6 karakter, atau isi ipd32 untuk kembali ke kata sandi awal.</p>
-    <label class="block">Ulangi kata sandi baru<input name="ulang" type="password" required autocomplete="new-password" class="${fieldStyle}"></label>
-    <p role="alert" class="text-rose-700"></p><button type="button" class="${secondaryStyle}" onclick="closeModal()">Batal</button> <button class="${primaryStyle}">Simpan</button></form>`);
-  const form=document.getElementById('ubah-password');
-  form.onsubmit=async e=>{
-    e.preventDefault();
-    const error=form.querySelector('[role=alert]'), button=form.querySelector('button:not([type])');
-    if(form.elements.baru.value!==form.elements.ulang.value){error.textContent='Kedua kata sandi baru harus sama.';return;}
-    button.disabled=true;
-    try{
-      const {data}=await DB.client.auth.getSession();
-      await akunRequest({aksi:self?'ubah':'atur',username:member.username,password:form.elements.lama?.value,baru:form.elements.baru.value},data.session?.access_token);
-      closeModal();showToast('Kata sandi berhasil disimpan.','success');
-    }catch(e){error.textContent=e.message;button.disabled=false;}
-  };
-}
 async function periksaLaporan(button) {
   const y=Number(button.previousElementSibling.value);
   const panel=button.parentElement.nextElementSibling;

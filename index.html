@@ -958,7 +958,6 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                 </div>
               </div>
             </div>
-            ${State.session.role==='anggota'?`<button class="w-full text-sm text-teal-700 py-2" onclick="passwordAnggota()">Ganti kata sandi</button>`:''}
             <button onclick="handleLogout()"
               class="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 transition active:scale-[0.98]">
               <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
@@ -986,7 +985,6 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
               <button onclick="refreshData()" title="Muat Ulang" class="p-2 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200">
                 <i data-lucide="refresh-cw" class="w-4 h-4"></i>
               </button>
-              ${State.session.role==='anggota'?`<button class="text-xs font-semibold text-teal-700 px-2 py-2" onclick="passwordAnggota()">Ganti kata sandi</button>`:''}
               <button onclick="handleLogout()" title="Keluar" class="p-2 rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-100">
                 <i data-lucide="log-out" class="w-4 h-4"></i>
               </button>
@@ -3073,7 +3071,6 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                     </td>
                     <td class="py-3 px-4 text-xs">
                       <span class="px-2 py-0.5 rounded bg-slate-100 font-mono text-slate-700">${escapeHtml(m.username)}</span>
-                      ${isAdmin()?`<button class="text-teal-700 font-semibold ml-2" onclick="passwordAnggota('${m.id}')">Ganti kata sandi</button>`:''}
                     </td>
                     <td class="py-3 px-4">
                       <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
@@ -3085,7 +3082,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                       ${m.aktif_sejak ? `<div class="text-[11px] text-slate-400">Sejak ${escapeHtml(m.aktif_sejak)}</div>` : ''}
                     </td>
                     <td class="py-3 px-4 text-right whitespace-nowrap">
-                      <button ${isAdmin()?'':'hidden'} onclick="openMemberModal('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-teal-700"><i data-lucide="pencil" class="w-4 h-4"></i></button>
+                      <button aria-label="Edit anggota" title="Edit anggota" ${isAdmin()?'':'hidden'} onclick="openMemberModal('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-teal-700"><i data-lucide="pencil" class="w-4 h-4"></i></button>
                       <button ${isAdmin()?'':'hidden'} onclick="deleteMember('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
                     </td>
                   </tr>
@@ -3142,6 +3139,9 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
             </div>
             
           </div>
+          ${m ? `<label class="block text-sm font-semibold">Kata sandi baru (opsional)
+            <input id="mem-password" type="password" autocomplete="new-password" maxlength="256" class="block w-full mt-1 px-3.5 py-2.5 rounded-xl border border-slate-200">
+            <span class="text-xs text-slate-500 font-normal">Kosongkan untuk mempertahankan kata sandi. Isi minimal 6 karakter atau ipd32 untuk kembali ke kata sandi awal.</span></label>` : ''}
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Status</label>
@@ -3170,6 +3170,13 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
 
     async function saveMember(e, editId) {
       e.preventDefault();
+      if (!isAdmin()) return;
+      const button=e.currentTarget.querySelector('[type=submit]');
+      if(button.disabled)return;
+      const password=document.getElementById('mem-password')?.value || '';
+      if(password && password!=='ipd32' && password.length<6)return showToast('Kata sandi baru perlu minimal 6 karakter.', 'error');
+      button.disabled=true;
+      let profileSaved=false;
       const payload = {
         nama: document.getElementById('mem-nama').value.trim(),
         peran: document.getElementById('mem-peran').value,
@@ -3182,6 +3189,11 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
       try {
         if (editId) {
           await DB.updateRow('anggota', editId, payload);
+          profileSaved=true;
+          if(password){
+            const {data}=await DB.client.auth.getSession();
+            await akunRequest({aksi:'atur',member_id:editId,username:payload.username,baru:password},data.session?.access_token);
+          }
           showToast('Data anggota diperbarui.', 'success');
         } else {
           await DB.insertRow('anggota', payload);
@@ -3190,7 +3202,9 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
         closeModal();
         await refreshData(true);
       } catch (err) {
-        showToast('Gagal menyimpan anggota: ' + err.message, 'error');
+        showToast((profileSaved?'Profil tersimpan. Kata sandi belum berhasil disimpan: ':'Gagal menyimpan anggota: ') + err.message, 'error');
+      } finally {
+        button.disabled=false;
       }
     }
 

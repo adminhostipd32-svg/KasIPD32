@@ -15,30 +15,31 @@ Deno.serve(async req=>{
   const admin=createClient(url,Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,options);
   const auth=createClient(url,anon,options);
   try{
-    const {aksi,username,password,baru}=await req.json();
-    if(!["login","ubah","atur"].includes(aksi)||typeof username!=="string"||!username.trim()||username.length>160)return reply({error:"Permintaan tidak valid."},400);
+    const {aksi,username,password,baru,member_id}=await req.json();
+    if(!["login","atur"].includes(aksi)||typeof username!=="string"||!username.trim()||username.length>160)return reply({error:"Permintaan tidak valid."},400);
     if(aksi!=="atur"&&(typeof password!=="string"||!password||password.length>256))return reply({error:"Masukkan kata sandi."},400);
     if(aksi!=="login"&&(typeof baru!=="string"||baru.length>256||(baru!==defaultPassword&&baru.length<6)))return reply({error:"Gunakan minimal 6 karakter atau kata sandi awal."},400);
     const denied=()=>reply({error:"Username atau kata sandi salah."},401);
-    let actor;
+
     if(aksi!=="login"){
       const caller=createClient(url,anon,{...options,global:{headers:{Authorization:req.headers.get("Authorization")||""}}});
       const {data,error}=await caller.rpc("identitas_kas");
-      if(error||!data||(aksi==="atur"?data.role!=="admin":data.role!=="anggota"))return reply({error:"Akses ditolak."},403);
-      actor=data;
+      if(error||!data||data.role!=="admin")return reply({error:"Akses ditolak."},403);
+      if(typeof member_id!=="string")return reply({error:"Anggota tidak valid."},400);
     }
-    const lookup=await admin.rpc("akun_login_kas",{uname:username});
+    const rpc=aksi==="atur"?"akun_login_kas_id":"akun_login_kas";
+    const target=aksi==="atur"?{mid:member_id}:{uname:username};
+    const lookup=await admin.rpc(rpc,target);
     if(lookup.error)throw lookup.error;
     let account=lookup.data;
     if(!account)return aksi==="atur"?reply({error:"Anggota tidak ditemukan."},404):denied();
-    if(aksi==="ubah"&&account.member!==actor.id)return reply({error:"Akses ditolak."},403);
     if(!account.uid){
-      if(aksi==="ubah"||(aksi==="login"&&password!==defaultPassword))return denied();
+      if(aksi==="login"&&password!==defaultPassword)return denied();
       const email=crypto.randomUUID()+"@anggota.invalid";
       const created=await admin.auth.admin.createUser({email,password:credential(aksi==="atur"?baru:defaultPassword,email),email_confirm:true});
       if(created.error)throw created.error;
       const uid=created.data.user.id;
-      const linked=await admin.rpc("akun_login_kas",{uname:username,calon:uid});
+      const linked=await admin.rpc(rpc,{...target,calon:uid});
       if(!linked.error&&linked.data?.uid!==uid)await admin.auth.admin.deleteUser(uid);
       if(linked.error||!linked.data)throw new Error("Pendaftaran gagal");
       account=linked.data;

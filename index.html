@@ -207,216 +207,6 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
     /* ============================================================================
        SQL MIGRATION SCRIPT (SIAP SALIN KE SUPABASE SQL EDITOR)
     ============================================================================ */
-    const SUPABASE_SQL_SCRIPT = `-- ============================================================
--- SKEMA DATABASE SUPABASE: APLIKASI KAS IPD 32
--- Jalankan skrip ini di Supabase Dashboard -> SQL Editor -> Run
--- ============================================================
-
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-
--- 1. Tabel Periode & Tarif Kas Tahunan
-CREATE TABLE IF NOT EXISTS public.periode_kas (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tahun INT UNIQUE NOT NULL,
-  tarif_bulanan BIGINT NOT NULL DEFAULT 20000,
-  keterangan TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- 2. Tabel Master Anggota (sekaligus kredensial login Role Anggota)
-CREATE TABLE IF NOT EXISTS public.anggota (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  nama TEXT NOT NULL,
-  peran TEXT NOT NULL DEFAULT 'Perawat',
-  username TEXT UNIQUE NOT NULL,
-  password TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'Aktif' CHECK (status IN ('Aktif', 'Resign', 'Mutasi', 'Pindah')),
-  catatan_status TEXT,
-  aktif_sejak TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- 3. Tabel Iuran Kas Bulanan (anti duplikasi per anggota-tahun-bulan)
-CREATE TABLE IF NOT EXISTS public.iuran_kas (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  anggota_id UUID NOT NULL REFERENCES public.anggota(id) ON DELETE CASCADE,
-  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE RESTRICT,
-  bulan SMALLINT NOT NULL CHECK (bulan BETWEEN 1 AND 12),
-  nominal BIGINT NOT NULL DEFAULT 0,
-  tanggal_bayar DATE DEFAULT CURRENT_DATE,
-  keterangan TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(anggota_id, tahun, bulan)
-);
-
--- 4. Tabel Saldo Lebih Bayar per Anggota per Tahun
-CREATE TABLE IF NOT EXISTS public.saldo_lebih_bayar (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  anggota_id UUID NOT NULL REFERENCES public.anggota(id) ON DELETE CASCADE,
-  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE RESTRICT,
-  nominal BIGINT NOT NULL DEFAULT 0,
-  keterangan TEXT,
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(anggota_id, tahun)
-);
-
--- 5. Tabel Master Patungan & Acara
-CREATE TABLE IF NOT EXISTS public.patungan_event (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  nama_event TEXT NOT NULL,
-  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE RESTRICT,
-  tarif_default BIGINT NOT NULL DEFAULT 0,
-  catatan_tarif TEXT,
-  total_pengeluaran BIGINT NOT NULL DEFAULT 0,
-  subsidi_kas BIGINT CHECK (subsidi_kas >= 0),
-  status TEXT NOT NULL DEFAULT 'Berjalan' CHECK (status IN ('Berjalan', 'Selesai')),
-  terposting_ke_kas BOOLEAN NOT NULL DEFAULT FALSE,
-  keterangan TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- 6. Tabel Peserta Patungan (mendukung anggota internal & peserta eksternal/dokter)
-CREATE TABLE IF NOT EXISTS public.patungan_peserta (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  patungan_id UUID NOT NULL REFERENCES public.patungan_event(id) ON DELETE CASCADE,
-  anggota_id UUID REFERENCES public.anggota(id) ON DELETE SET NULL,
-  nama_peserta TEXT NOT NULL,
-  tarif_target BIGINT NOT NULL DEFAULT 0,
-  nominal_bayar BIGINT NOT NULL DEFAULT 0,
-  status_bayar TEXT NOT NULL DEFAULT 'Belum Bayar' CHECK (status_bayar IN ('Lunas', 'Belum Bayar')),
-  keterangan TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- 7. Tabel Transaksi Kas (Pemasukan Lain & Pengeluaran)
-CREATE TABLE IF NOT EXISTS public.transaksi_kas (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tahun INT NOT NULL REFERENCES public.periode_kas(tahun) ON DELETE RESTRICT,
-  bulan SMALLINT NOT NULL CHECK (bulan BETWEEN 1 AND 12),
-  tanggal DATE NOT NULL DEFAULT CURRENT_DATE,
-  tipe TEXT NOT NULL CHECK (tipe IN ('masuk_lain', 'keluar')),
-  kategori TEXT NOT NULL,
-  deskripsi TEXT NOT NULL,
-  nominal BIGINT NOT NULL CHECK (nominal >= 0),
-  patungan_id UUID REFERENCES public.patungan_event(id) ON DELETE SET NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- ============================================================
-create or replace function public.posting_patungan(p_event uuid, p_tanggal date)
-returns void language plpgsql security invoker set search_path = '' as $$
-declare
-  acara public.patungan_event%rowtype;
-  terkumpul bigint;
-  subsidi bigint;
-  sisa bigint;
-begin
-  select * into strict acara from public.patungan_event where id = p_event for update;
-  if acara.terposting_ke_kas then return; end if;
-  if extract(year from p_tanggal) <> acara.tahun or p_tanggal is null then
-    raise exception 'Tanggal posting harus berada pada tahun acara.';
-  end if;
-  select coalesce(sum(nominal_bayar), 0) into terkumpul from public.patungan_peserta where patungan_id = p_event;
-  subsidi := coalesce(acara.subsidi_kas, greatest(acara.total_pengeluaran - terkumpul, 0));
-  sisa := terkumpul + subsidi - acara.total_pengeluaran;
-  if sisa < 0 then raise exception 'Dana peserta dan subsidi belum menutup biaya acara.'; end if;
-  if subsidi > 0 then
-    insert into public.transaksi_kas(tahun,bulan,tanggal,tipe,kategori,deskripsi,nominal,patungan_id)
-    values(acara.tahun,extract(month from p_tanggal),p_tanggal,'keluar','Defisit Patungan','Subsidi kas — ' || acara.nama_event,subsidi,p_event);
-  end if;
-  if sisa > 0 then
-    insert into public.transaksi_kas(tahun,bulan,tanggal,tipe,kategori,deskripsi,nominal,patungan_id)
-    values(acara.tahun,extract(month from p_tanggal),p_tanggal,'masuk_lain','Sisa Patungan','Sisa Patungan — ' || acara.nama_event,sisa,p_event);
-  end if;
-  update public.patungan_event set terposting_ke_kas=true, status='Selesai' where id=p_event;
-end;
-$$;
-revoke all on function public.posting_patungan(uuid,date) from public, anon;
-grant execute on function public.posting_patungan(uuid,date) to authenticated;
-
-
-create or replace function public.buat_patungan_dengan_anggota(p_id uuid, p_acara jsonb, p_anggota uuid[])
-returns uuid language plpgsql security invoker set search_path = '' as $$
-declare
-  saved uuid;
-  expected integer;
-  added integer;
-  rate bigint := (p_acara->>'tarif_default')::bigint;
-begin
-  if nullif(trim(p_acara->>'nama_event'),'') is null or rate is null or rate < 0 then
-    raise exception 'Nama acara dan tarif yang valid diperlukan.';
-  end if;
-  insert into public.patungan_event
-    (id,nama_event,tahun,status,tarif_default,total_pengeluaran,subsidi_kas,catatan_tarif,keterangan)
-  values (p_id,trim(p_acara->>'nama_event'),(p_acara->>'tahun')::int,p_acara->>'status',
-    rate,(p_acara->>'total_pengeluaran')::bigint,(p_acara->>'subsidi_kas')::bigint,
-    p_acara->>'catatan_tarif',p_acara->>'keterangan')
-  on conflict (id) do nothing returning id into saved;
-  if saved is null then return p_id; end if;
-  select count(distinct item) into expected from unnest(p_anggota) as u(item);
-  insert into public.patungan_peserta
-    (patungan_id,anggota_id,nama_peserta,tarif_target,nominal_bayar,status_bayar,keterangan)
-  select saved,a.id,a.nama,rate,0,case when rate=0 then 'Lunas' else 'Belum Bayar' end,a.peran
-  from public.anggota a where a.id=any(p_anggota);
-  get diagnostics added = row_count;
-  if added <> expected then raise exception 'Daftar anggota berubah. Muat ulang dan periksa pilihan peserta.'; end if;
-  return saved;
-end;
-$$;
-revoke all on function public.buat_patungan_dengan_anggota(uuid,jsonb,uuid[]) from public, anon;
-grant execute on function public.buat_patungan_dengan_anggota(uuid,jsonb,uuid[]) to authenticated;
-
-
--- ROW LEVEL SECURITY (RLS) UNTUK HYBRID AUTH
--- Anggota (Anon / Login via Tabel) -> READ ONLY
--- Admin (Supabase Auth Authenticated) -> FULL CRUD
--- ============================================================
-ALTER TABLE public.periode_kas ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.anggota ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.iuran_kas ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.saldo_lebih_bayar ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.patungan_event ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.patungan_peserta ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.transaksi_kas ENABLE ROW LEVEL SECURITY;
-
--- Kebijakan SELECT transparan untuk Anggota & Admin
-CREATE POLICY "Read periode_kas" ON public.periode_kas FOR SELECT USING (true);
-CREATE POLICY "Read anggota" ON public.anggota FOR SELECT USING (true);
-CREATE POLICY "Read iuran_kas" ON public.iuran_kas FOR SELECT USING (true);
-CREATE POLICY "Read saldo_lebih_bayar" ON public.saldo_lebih_bayar FOR SELECT USING (true);
-CREATE POLICY "Read patungan_event" ON public.patungan_event FOR SELECT USING (true);
-CREATE POLICY "Read patungan_peserta" ON public.patungan_peserta FOR SELECT USING (true);
-CREATE POLICY "Read transaksi_kas" ON public.transaksi_kas FOR SELECT USING (true);
-
--- Kebijakan WRITE (INSERT/UPDATE/DELETE) khusus Admin (Supabase Auth)
-CREATE POLICY "Admin write periode_kas" ON public.periode_kas FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "Admin write anggota" ON public.anggota FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "Admin write iuran_kas" ON public.iuran_kas FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "Admin write saldo_lebih_bayar" ON public.saldo_lebih_bayar FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "Admin write patungan_event" ON public.patungan_event FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "Admin write patungan_peserta" ON public.patungan_peserta FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
-CREATE POLICY "Admin write transaksi_kas" ON public.transaksi_kas FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
-
--- ============================================================
--- DATA AWAL (SEED PERIODE KAS 2023-2026 & CONTOH ANGGOTA)
--- ============================================================
-INSERT INTO public.periode_kas (tahun, tarif_bulanan, keterangan) VALUES
-  (2023, 10000, 'Tarif awal iuran kas IPD 32'),
-  (2024, 15000, 'Penyesuaian tarif iuran 2024'),
-  (2025, 15000, 'Tarif iuran tahun 2025'),
-  (2026, 20000, 'Penyesuaian tarif iuran 2026')
-ON CONFLICT (tahun) DO NOTHING;
-
-INSERT INTO public.anggota (nama, peran, username, password, status, catatan_status, aktif_sejak) VALUES
-  ('Atika', 'Perawat', 'atika', 'ipd32', 'Aktif', '', '2023'),
-  ('Elvina', 'Perawat', 'elvina', 'ipd32', 'Aktif', '', '2023'),
-  ('Tiara HCA', 'HCA', 'tiara', 'ipd32', 'Aktif', '', '2024')
-ON CONFLICT (username) DO NOTHING;
-`;
-
-    /* ============================================================================
-       UTILITAS PEMBANTU (FORMATTER, ESCAPE HTML, UUID, CLIPBOARD, TOAST)
-    ============================================================================ */
     function escapeHtml(str) {
       if (str === null || str === undefined) return '';
       return String(str)
@@ -600,325 +390,8 @@ ON CONFLICT (username) DO NOTHING;
       `, 'max-w-md');
     }
 
-    /* ============================================================================
-       DEMO SEED DATA (MEREFLEKSIKAN STRUKTUR REALISTIS KAS UPDATE IPD 32.xlsx)
-    ============================================================================ */
-    function buildDemoSeedData() {
-      const periode_kas = [
-        { id: 'p-2023', tahun: 2023, tarif_bulanan: 10000, keterangan: 'Tarif awal kas ruangan IPD 32' },
-        { id: 'p-2024', tahun: 2024, tarif_bulanan: 15000, keterangan: 'Penyesuaian iuran 2024' },
-        { id: 'p-2025', tahun: 2025, tarif_bulanan: 15000, keterangan: 'Tarif tetap 2025' },
-        { id: 'p-2026', tahun: 2026, tarif_bulanan: 20000, keterangan: 'Penyesuaian tarif iuran 2026' },
-      ];
-
-      const memberNames = [
-        { id: 'm-01', nama: 'Atika', peran: 'Perawat', username: 'atika', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-02', nama: 'Elvina', peran: 'Perawat', username: 'elvina', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-03', nama: 'Tiara HCA', peran: 'HCA', username: 'tiara', status: 'Aktif', catatan: 'Cek ulang iuran Ags/Sep 2025', sejak: '2024' },
-        { id: 'm-04', nama: 'Ns. Rina Kartika', peran: 'Perawat', username: 'rina', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-05', nama: 'Ns. Dewi Lestari', peran: 'Perawat', username: 'dewi', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-06', nama: 'Ns. Putri Rahma', peran: 'Perawat', username: 'putri', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-07', nama: 'Ns. Sari Wulandari', peran: 'Perawat', username: 'sari', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-08', nama: 'Ns. Nadia Kusuma', peran: 'Perawat', username: 'nadia', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-09', nama: 'Ns. Fitriani', peran: 'Perawat', username: 'fitri', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-10', nama: 'Ns. Indah Permata', peran: 'Perawat', username: 'indah', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-11', nama: 'Ns. Ayu Pratiwi', peran: 'Perawat', username: 'ayu', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-12', nama: 'Ns. Diah Anggraini', peran: 'Perawat', username: 'diah', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-13', nama: 'Ns. Wahyu Pratama', peran: 'Perawat', username: 'wahyu', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-14', nama: 'Ns. Rizky Saputra', peran: 'Perawat', username: 'rizky', status: 'Aktif', catatan: '', sejak: '2023' },
-        { id: 'm-15', nama: 'Ns. Mega Puspita', peran: 'Perawat', username: 'mega', status: 'Aktif', catatan: '', sejak: '2024' },
-        { id: 'm-16', nama: 'Ns. Nurul Hidayah', peran: 'Perawat', username: 'nurul', status: 'Aktif', catatan: '', sejak: '2024' },
-        { id: 'm-17', nama: 'Ns. Clara Wijaya', peran: 'Perawat', username: 'clara', status: 'Aktif', catatan: '', sejak: '2024' },
-        { id: 'm-18', nama: 'Ns. Ratna Sari', peran: 'Perawat', username: 'ratna', status: 'Aktif', catatan: '', sejak: '2024' },
-        { id: 'm-19', nama: 'Budi HCA', peran: 'HCA', username: 'budi', status: 'Aktif', catatan: '', sejak: '2024' },
-        { id: 'm-20', nama: 'Sinta HCA', peran: 'HCA', username: 'sinta', status: 'Aktif', catatan: '', sejak: '2025' },
-        { id: 'm-21', nama: 'Ns. Melati', peran: 'Perawat', username: 'melati', status: 'Aktif', catatan: '', sejak: '2025' },
-        { id: 'm-22', nama: 'Ns. Hana Safitri', peran: 'Perawat', username: 'hana', status: 'Aktif', catatan: 'Bergabung Feb 2026', sejak: '2026' },
-        { id: 'm-23', nama: 'Dana', peran: 'Perawat', username: 'dana', status: 'Resign', catatan: 'Resign Mei 2026', sejak: '2023' },
-        { id: 'm-24', nama: 'Mutiara', peran: 'Perawat', username: 'mutiara', status: 'Mutasi', catatan: 'Mutasi ke Unit ICU Jul 2026', sejak: '2023' },
-        { id: 'm-25', nama: 'Ns. Dimas', peran: 'Perawat', username: 'dimas', status: 'Resign', catatan: 'Resign Nov 2025', sejak: '2023' },
-      ];
-
-      const anggota = memberNames.map((m) => ({
-        id: m.id,
-        nama: m.nama,
-        peran: m.peran,
-        username: m.username,
-        password: '123',
-        status: m.status,
-        catatan_status: m.catatan,
-        aktif_sejak: m.sejak,
-      }));
-
-      // Bangun data iuran kas 2023 - 2026
-      const iuran_kas = [];
-      let iuranSeq = 1;
-
-      const addIuran = (anggotaId, tahun, bulan, nominal, keterangan = '') => {
-        iuran_kas.push({
-          id: `iu-${iuranSeq++}`,
-          anggota_id: anggotaId,
-          tahun,
-          bulan,
-          nominal,
-          tanggal_bayar: `${tahun}-${String(bulan).padStart(2, '0')}-10`,
-          keterangan,
-        });
-      };
-
-      // 2023 (Rp 10.000) - 16 anggota aktif saat itu
-      anggota.slice(0, 14).concat([anggota[22], anggota[23], anggota[24]]).forEach((m) => {
-        for (let b = 1; b <= 12; b++) addIuran(m.id, 2023, b, 10000);
-      });
-
-      // 2024 (Rp 15.000) - 20 anggota
-      anggota.slice(0, 19).concat([anggota[22], anggota[23], anggota[24]]).forEach((m) => {
-        for (let b = 1; b <= 12; b++) addIuran(m.id, 2024, b, 15000);
-      });
-
-      // 2025 (Rp 15.000) - 24 anggota
-      anggota.forEach((m, idx) => {
-        if (m.id === 'm-22') return; // Hana bergabung 2026
-        const maxMonth = m.id === 'm-25' ? 11 : 12;
-        for (let b = 1; b <= maxMonth; b++) {
-          addIuran(m.id, 2025, b, 15000);
-        }
-      });
-
-      // 2026 (Rp 20.000) - sampai Nov 2026 dengan variasi Lunas & Kurang Bayar
-      anggota.forEach((m, idx) => {
-        if (m.id === 'm-25') return; // Sudah resign 2025
-        let startM = m.id === 'm-22' ? 2 : 1;
-        let endM = 11;
-        if (m.id === 'm-23') endM = 5; // Dana resign Mei
-        else if (m.id === 'm-24') endM = 7; // Mutiara mutasi Juli
-        else if (idx % 5 === 0) endM = 12; // Sudah lunas full setahun
-        else if (idx % 4 === 3) endM = 9; // Kurang bayar Okt-Nov
-        else if (idx % 7 === 2) endM = 8; // Kurang bayar Sep-Nov
-
-        for (let b = startM; b <= endM; b++) {
-          addIuran(m.id, 2026, b, 20000);
-        }
-      });
-
-      const saldo_lebih_bayar = [
-        { id: 'lb-1', anggota_id: 'm-01', tahun: 2026, nominal: 5000, keterangan: 'Sisa transfer iuran' },
-        { id: 'lb-2', anggota_id: 'm-02', tahun: 2026, nominal: 45000, keterangan: 'Deposit iuran dimuka' },
-      ];
-
-      // Patungan & Acara (mencakup dr. Andre multi-tarif, Dana, Mutiara, dll)
-      const patungan_event = [
-        {
-          id: 'pat-1',
-          nama_event: 'Patungan Perpisahan dr. Andre',
-          tahun: 2025,
-          tarif_default: 50000,
-          catatan_tarif: 'Perawat/Ns Rp 50.000 • Dokter Rp 91.000',
-          total_pengeluaran: 1650000,
-          status: 'Selesai',
-          terposting_ke_kas: true,
-          keterangan: 'Kado jam tangan + plakat + makan bersama tim IPD 32 & DPJP',
-        },
-        {
-          id: 'pat-2',
-          nama_event: 'Perpisahan Dana (Resign)',
-          tahun: 2026,
-          tarif_default: 35000,
-          catatan_tarif: 'Seragam Rp 35.000/orang',
-          total_pengeluaran: 680000,
-          status: 'Selesai',
-          terposting_ke_kas: false,
-          keterangan: 'Kado kenang-kenangan & tumpeng mini (belum diposting ke kas)',
-        },
-        {
-          id: 'pat-3',
-          nama_event: 'Perpisahan Mutiara (Mutasi ICU)',
-          tahun: 2026,
-          tarif_default: 35000,
-          catatan_tarif: 'Seragam Rp 35.000/orang',
-          total_pengeluaran: 750000,
-          status: 'Berjalan',
-          terposting_ke_kas: false,
-          keterangan: 'Pengumpulan patungan untuk kado & buket bunga',
-        },
-        {
-          id: 'pat-4',
-          nama_event: 'Kado Pernikahan Ns. Clara',
-          tahun: 2025,
-          tarif_default: 30000,
-          catatan_tarif: 'Seragam Rp 30.000/orang',
-          total_pengeluaran: 590000,
-          status: 'Selesai',
-          terposting_ke_kas: true,
-          keterangan: 'Kado set alat makan & amplop ucapan',
-        },
-        {
-          id: 'pat-5',
-          nama_event: 'Buka Bersama IPD 32 Ramadhan',
-          tahun: 2026,
-          tarif_default: 50000,
-          catatan_tarif: 'Rp 50.000/peserta',
-          total_pengeluaran: 1120000,
-          status: 'Selesai',
-          terposting_ke_kas: true,
-          keterangan: 'Paket nasi box + takjil ruangan shift pagi/sore/malam',
-        },
-      ];
-
-      const patungan_peserta = [];
-      let ppSeq = 1;
-      // Peserta patungan dr. Andre (Perawat 50rb + 6 Dokter eksternal 91rb)
-      anggota.slice(0, 22).forEach((m) => {
-        patungan_peserta.push({
-          id: `pp-${ppSeq++}`,
-          patungan_id: 'pat-1',
-          anggota_id: m.id,
-          nama_peserta: m.nama,
-          tarif_target: 50000,
-          nominal_bayar: 50000,
-          status_bayar: 'Lunas',
-          keterangan: m.peran,
-        });
-      });
-      ['dr. Hendra Sp.PD', 'dr. Maya Sp.PD', 'dr. Budi Sp.PD', 'dr. Ratih Sp.PD', 'dr. Kevin', 'dr. Aulia'].forEach((dok) => {
-        patungan_peserta.push({
-          id: `pp-${ppSeq++}`,
-          patungan_id: 'pat-1',
-          anggota_id: null,
-          nama_peserta: dok,
-          tarif_target: 91000,
-          nominal_bayar: 91000,
-          status_bayar: 'Lunas',
-          keterangan: 'Dokter (Eksternal)',
-        });
-      });
-
-      // Peserta Patungan Dana
-      anggota.slice(0, 22).forEach((m, i) => {
-        const lunas = i < 21;
-        patungan_peserta.push({
-          id: `pp-${ppSeq++}`,
-          patungan_id: 'pat-2',
-          anggota_id: m.id,
-          nama_peserta: m.nama,
-          tarif_target: 35000,
-          nominal_bayar: lunas ? 35000 : 0,
-          status_bayar: lunas ? 'Lunas' : 'Belum Bayar',
-          keterangan: '',
-        });
-      });
-
-      // Peserta Patungan Mutiara (sedang berjalan)
-      anggota.slice(0, 22).forEach((m, i) => {
-        const lunas = i < 16;
-        patungan_peserta.push({
-          id: `pp-${ppSeq++}`,
-          patungan_id: 'pat-3',
-          anggota_id: m.id,
-          nama_peserta: m.nama,
-          tarif_target: 35000,
-          nominal_bayar: lunas ? 35000 : 0,
-          status_bayar: lunas ? 'Lunas' : 'Belum Bayar',
-          keterangan: '',
-        });
-      });
-
-      // Peserta Patungan Clara
-      anggota.slice(0, 20).forEach((m) => {
-        patungan_peserta.push({
-          id: `pp-${ppSeq++}`,
-          patungan_id: 'pat-4',
-          anggota_id: m.id,
-          nama_peserta: m.nama,
-          tarif_target: 30000,
-          nominal_bayar: 30000,
-          status_bayar: 'Lunas',
-          keterangan: '',
-        });
-      });
-
-      // Peserta Bukber
-      anggota.slice(0, 22).forEach((m) => {
-        patungan_peserta.push({
-          id: `pp-${ppSeq++}`,
-          patungan_id: 'pat-5',
-          anggota_id: m.id,
-          nama_peserta: m.nama,
-          tarif_target: 50000,
-          nominal_bayar: 50000,
-          status_bayar: 'Lunas',
-          keterangan: '',
-        });
-      });
-
-      // Transaksi Pemasukan Lain & Pengeluaran (2023 - 2026)
-      const transaksi_kas = [
-        // 2023
-        { id: 'tx-01', tahun: 2023, bulan: 3, tanggal: '2023-03-14', tipe: 'masuk_lain', kategori: 'Cordlife', deskripsi: 'Fee Cordlife Triwulan I', nominal: 350000, patungan_id: null },
-        { id: 'tx-02', tahun: 2023, bulan: 4, tanggal: '2023-04-08', tipe: 'keluar', kategori: 'Takjil / Ramadhan', deskripsi: 'Takjil & buka bersama jaga IPD 32', nominal: 650000, patungan_id: null },
-        { id: 'tx-03', tahun: 2023, bulan: 7, tanggal: '2023-07-21', tipe: 'keluar', kategori: 'Besuk / Sakit', deskripsi: 'Parsel buah besuk keluarga perawat', nominal: 420000, patungan_id: null },
-        { id: 'tx-04', tahun: 2023, bulan: 9, tanggal: '2023-09-12', tipe: 'masuk_lain', kategori: 'IND', deskripsi: 'Pemasukan IND ruangan', nominal: 400000, patungan_id: null },
-        { id: 'tx-05', tahun: 2023, bulan: 11, tanggal: '2023-11-18', tipe: 'keluar', kategori: 'Duka / Melayat', deskripsi: 'Santunan duka cita orang tua anggota', nominal: 500000, patungan_id: null },
-        { id: 'tx-06', tahun: 2023, bulan: 12, tanggal: '2023-12-28', tipe: 'keluar', kategori: 'Adm Bank', deskripsi: 'Rekap potongan adm bank tahun 2023', nominal: 180000, patungan_id: null },
-        { id: 'tx-07', tahun: 2023, bulan: 12, tanggal: '2023-12-30', tipe: 'keluar', kategori: 'Konsumsi / Rapat', deskripsi: 'Konsumsi evaluasi akhir tahun IPD 32', nominal: 850000, patungan_id: null },
-
-        // 2024
-        { id: 'tx-08', tahun: 2024, bulan: 2, tanggal: '2024-02-15', tipe: 'masuk_lain', kategori: 'Cordlife', deskripsi: 'Insentif Cordlife Semester I', nominal: 500000, patungan_id: null },
-        { id: 'tx-09', tahun: 2024, bulan: 3, tanggal: '2024-03-22', tipe: 'keluar', kategori: 'Takjil / Ramadhan', deskripsi: 'Takjil & konsumsi Ramadhan 2024', nominal: 1150000, patungan_id: null },
-        { id: 'tx-10', tahun: 2024, bulan: 6, tanggal: '2024-06-10', tipe: 'keluar', kategori: 'Kado / Pernikahan', deskripsi: 'Kado pernikahan & kelahiran bayi anggota', nominal: 950000, patungan_id: null },
-        { id: 'tx-11', tahun: 2024, bulan: 8, tanggal: '2024-08-19', tipe: 'masuk_lain', kategori: 'IND', deskripsi: 'Pemasukan IND Q3 2024', nominal: 350000, patungan_id: null },
-        { id: 'tx-12', tahun: 2024, bulan: 10, tanggal: '2024-10-05', tipe: 'keluar', kategori: 'Besuk / Sakit', deskripsi: 'Besuk rawat inap & bingkisan anggota', nominal: 780000, patungan_id: null },
-        { id: 'tx-13', tahun: 2024, bulan: 12, tanggal: '2024-12-20', tipe: 'keluar', kategori: 'Makan Perpisahan', deskripsi: 'Makan bersama & kenang-kenangan akhir tahun', nominal: 1620000, patungan_id: null },
-        { id: 'tx-14', tahun: 2024, bulan: 12, tanggal: '2024-12-31', tipe: 'keluar', kategori: 'Adm Bank', deskripsi: 'Potongan adm bank tahun 2024', nominal: 192000, patungan_id: null },
-
-        // 2025
-        { id: 'tx-15', tahun: 2025, bulan: 3, tanggal: '2025-03-18', tipe: 'keluar', kategori: 'Takjil / Ramadhan', deskripsi: 'Konsumsi buka puasa & sahur shift malam', nominal: 1250000, patungan_id: null },
-        { id: 'tx-16', tahun: 2025, bulan: 5, tanggal: '2025-05-11', tipe: 'masuk_lain', kategori: 'Sisa Patungan', deskripsi: 'Sisa Patungan Kado Pernikahan Ns. Clara', nominal: 10000, patungan_id: 'pat-4' },
-        { id: 'tx-17', tahun: 2025, bulan: 7, tanggal: '2025-07-09', tipe: 'masuk_lain', kategori: 'Cordlife', deskripsi: 'Fee Cordlife 2025', nominal: 450000, patungan_id: null },
-        { id: 'tx-18', tahun: 2025, bulan: 8, tanggal: '2025-08-22', tipe: 'keluar', kategori: 'Duka / Melayat', deskripsi: 'Santunan duka & karangan bunga', nominal: 850000, patungan_id: null },
-        { id: 'tx-19', tahun: 2025, bulan: 10, tanggal: '2025-10-14', tipe: 'masuk_lain', kategori: 'Sisa Patungan', deskripsi: 'Sisa Patungan Perpisahan dr. Andre (lebih dari total belanja)', nominal: 0, patungan_id: 'pat-1' },
-        { id: 'tx-20', tahun: 2025, bulan: 11, tanggal: '2025-11-28', tipe: 'keluar', kategori: 'Makan Perpisahan', deskripsi: 'Perpisahan Ns. Dimas & makan tim', nominal: 1380000, patungan_id: null },
-        { id: 'tx-21', tahun: 2025, bulan: 12, tanggal: '2025-12-30', tipe: 'keluar', kategori: 'Adm Bank', deskripsi: 'Potongan adm bank tahun 2025', nominal: 195000, patungan_id: null },
-
-        // 2026
-        { id: 'tx-22', tahun: 2026, bulan: 2, tanggal: '2026-02-14', tipe: 'masuk_lain', kategori: 'Cordlife', deskripsi: 'Fee Cordlife awal tahun 2026', nominal: 400000, patungan_id: null },
-        { id: 'tx-23', tahun: 2026, bulan: 3, tanggal: '2026-03-20', tipe: 'keluar', kategori: 'Defisit Patungan', deskripsi: 'Subsidi kas untuk Buka Bersama IPD 32 Ramadhan', nominal: 20000, patungan_id: 'pat-5' },
-        { id: 'tx-24', tahun: 2026, bulan: 4, tanggal: '2026-04-12', tipe: 'keluar', kategori: 'Besuk / Sakit', deskripsi: 'Besuk anggota sakit & parsel buah', nominal: 650000, patungan_id: null },
-        { id: 'tx-25', tahun: 2026, bulan: 6, tanggal: '2026-06-25', tipe: 'keluar', kategori: 'Perlengkapan Ruangan', deskripsi: 'Dispenser galon, kopi/teh & ATK nurse station', nominal: 1120000, patungan_id: null },
-        { id: 'tx-26', tahun: 2026, bulan: 9, tanggal: '2026-09-18', tipe: 'keluar', kategori: 'Konsumsi / Rapat', deskripsi: 'Konsumsi rapat akreditasi & audit mutu IPD 32', nominal: 1450000, patungan_id: null },
-        { id: 'tx-27', tahun: 2026, bulan: 10, tanggal: '2026-10-30', tipe: 'keluar', kategori: 'Adm Bank', deskripsi: 'Potongan adm bank Jan–Okt 2026', nominal: 165140, patungan_id: null },
-        { id: 'tx-28', tahun: 2026, bulan: 11, tanggal: '2026-11-10', tipe: 'keluar', kategori: 'Kado / Pernikahan', deskripsi: 'Kado kelahiran & bingkisan sosial IPD 32', nominal: 975000, patungan_id: null },
-      ].filter((t) => t.nominal > 0);
-
-      // Hitung sisa patungan dr. Andre yg akurat: 22*50000 + 6*91000 = 1.646.000 vs 1.650.000 -> defisit 4.000
-      transaksi_kas.push({
-        id: 'tx-19b',
-        tahun: 2025,
-        bulan: 10,
-        tanggal: '2025-10-14',
-        tipe: 'keluar',
-        kategori: 'Defisit Patungan',
-        deskripsi: 'Penutupan selisih Patungan Perpisahan dr. Andre',
-        nominal: 4000,
-        patungan_id: 'pat-1',
-      });
-
-      return {
-        periode_kas,
-        anggota,
-        iuran_kas,
-        saldo_lebih_bayar,
-        patungan_event,
-        patungan_peserta,
-        transaksi_kas,
-      };
-    }
-
-    /* ============================================================================
-       DUAL-ENGINE DATA ADAPTER (SUPABASE LIVE + MODE DEMO FALLBACK)
-    ============================================================================ */
     const DB = {
-      mode: 'demo', // 'supabase' | 'demo'
+      mode: 'offline',
       client: null,
       url: '',
       key: '',
@@ -935,49 +408,20 @@ ON CONFLICT (username) DO NOTHING;
             this.mode = 'supabase';
           } catch (e) {
             console.error('Supabase init error:', e);
-            this.mode = 'demo';
+            this.mode = 'offline';
             this.client = null;
           }
         } else {
-          this.mode = 'demo';
+          this.mode = 'offline';
           this.client = null;
-          this.ensureDemoData();
         }
-      },
-
-      ensureDemoData() {
-        const raw = localStorage.getItem(STORAGE_KEYS.DEMO_DB);
-        if (!raw) {
-          const seed = buildDemoSeedData();
-          localStorage.setItem(STORAGE_KEYS.DEMO_DB, JSON.stringify(seed));
-        }
-      },
-
-      getDemoStore() {
-        this.ensureDemoData();
-        try {
-          return JSON.parse(localStorage.getItem(STORAGE_KEYS.DEMO_DB));
-        } catch {
-          const seed = buildDemoSeedData();
-          localStorage.setItem(STORAGE_KEYS.DEMO_DB, JSON.stringify(seed));
-          return seed;
-        }
-      },
-
-      saveDemoStore(store) {
-        localStorage.setItem(STORAGE_KEYS.DEMO_DB, JSON.stringify(store));
-      },
-
-      resetDemoStore() {
-        const seed = buildDemoSeedData();
-        this.saveDemoStore(seed);
       },
 
       async readPages(table, column = 'id', ascending = true) {
         const rows = [];
         const size = 500;
         for (let offset = 0; ; offset += size) {
-          let query = this.client.from(table).select('*').order(column, { ascending });
+          let query = this.client.from(table).select(table==='anggota'?memberColumns:'*').order(column, { ascending });
           if (column !== 'id') query = query.order('id');
           const { data, error } = await query.range(offset, offset + size - 1);
           if (error) throw new Error(error.message);
@@ -987,91 +431,26 @@ ON CONFLICT (username) DO NOTHING;
       },
 
       async fetchAll() {
-        if (this.mode === 'supabase') {
-          const [p, a, i, lb, t, pe, pp] = await Promise.all([
-            this.readPages('periode_kas', 'tahun', true),
-            this.readPages('anggota', 'nama', true),
-            this.readPages('iuran_kas'),
-            this.readPages('saldo_lebih_bayar'),
-            this.readPages('transaksi_kas', 'tanggal', false),
-            this.readPages('patungan_event', 'tahun', false),
-            this.readPages('patungan_peserta', 'nama_peserta', true),
-          ]);
-          
-          return {
-            periode_kas: p.data || [],
-            anggota: a.data || [],
-            iuran_kas: i.data || [],
-            saldo_lebih_bayar: lb.data || [],
-            transaksi_kas: t.data || [],
-            patungan_event: pe.data || [],
-            patungan_peserta: pp.data || [],
-          };
-        } else {
-          return this.getDemoStore();
-        }
-      },
-
-      // Hybrid Login: Admin via Supabase Auth
-      async loginAdmin(email, password) {
-        if (this.mode === 'supabase') {
-          const { data, error } = await this.client.auth.signInWithPassword({ email, password });
-          if (error) throw new Error(error.message);
-          return {
-            role: data.user.app_metadata?.kas_role === 'it_support' ? 'it_support' : 'admin',
-            nama: data.user?.email?.split('@')[0] || 'Bendahara IPD 32',
-            email: data.user?.email,
-            id: data.user?.id,
-          };
-        } else {
-          if (!email || !password) throw new Error('Email dan password wajib diisi.');
-          return {
-            role: 'admin',
-            nama: 'Bendahara IPD 32',
-            email: email,
-            id: 'demo-admin',
-          };
-        }
-      },
-
-      // Hybrid Login: Anggota via validasi tabel `anggota`
-      async loginAnggota(username, password) {
-        const u = username.trim().toLowerCase();
-        const p = password.trim();
-        if (!u || !p) throw new Error('Username dan password wajib diisi.');
-
-        if (this.mode === 'supabase') {
-          const { data, error } = await this.client
-            .from('anggota')
-            .select('*')
-            .ilike('username', u)
-            .eq('password', p)
-            .maybeSingle();
-          if (error) throw new Error(error.message);
-          if (!data) throw new Error('Username atau password anggota tidak ditemukan.');
-          return {
-            role: 'anggota',
-            id: data.id,
-            nama: data.nama,
-            username: data.username,
-            peran: data.peran,
-            status: data.status,
-          };
-        } else {
-          const store = this.getDemoStore();
-          const found = store.anggota.find(
-            (m) => m.username.toLowerCase() === u && m.password === p
-          );
-          if (!found) throw new Error('Username atau password tidak cocok. (Demo: atika / 123)');
-          return {
-            role: 'anggota',
-            id: found.id,
-            nama: found.nama,
-            username: found.username,
-            peran: found.peran,
-            status: found.status,
-          };
-        }
+        const [p, a, i, lb, t, pe, pp] = await Promise.all([
+          this.readPages('periode_kas', 'tahun', true),
+          this.readPages('anggota', 'nama', true),
+          this.readPages('iuran_kas'),
+          this.readPages('saldo_lebih_bayar'),
+          this.readPages('transaksi_kas', 'tanggal', false),
+          this.readPages('patungan_event', 'tahun', false),
+          this.readPages('patungan_peserta', 'nama_peserta', true),
+        ]);
+        
+        return {
+          aggregate: State.session?.role==='anggota' ? await rpcKas('ringkasan_kas') : null,
+          periode_kas: p.data || [],
+          anggota: a.data || [],
+          iuran_kas: i.data || [],
+          saldo_lebih_bayar: lb.data || [],
+          transaksi_kas: t.data || [],
+          patungan_event: pe.data || [],
+          patungan_peserta: pp.data || [],
+        };
       },
 
       async logout() {
@@ -1085,111 +464,49 @@ ON CONFLICT (username) DO NOTHING;
 
       // Generic CRUD operations
       async upsertIuran(record) {
-        if (this.mode === 'supabase') {
-          const { error } = await this.client
-            .from('iuran_kas')
-            .upsert(record, { onConflict: 'anggota_id,tahun,bulan' });
-          if (error) throw new Error(error.message);
-        } else {
-          const store = this.getDemoStore();
-          const idx = store.iuran_kas.findIndex(
-            (x) => x.anggota_id === record.anggota_id && x.tahun === record.tahun && x.bulan === record.bulan
-          );
-          if (idx >= 0) store.iuran_kas[idx] = { ...store.iuran_kas[idx], ...record };
-          else store.iuran_kas.push({ id: generateUuid(), ...record });
-          this.saveDemoStore(store);
-        }
+        const { error } = await this.client
+          .from('iuran_kas')
+          .upsert(record, { onConflict: 'anggota_id,tahun,bulan' });
+        if (error) throw new Error(error.message);
       },
 
       async deleteIuran(anggota_id, tahun, bulan) {
-        if (this.mode === 'supabase') {
-          const { error } = await this.client
-            .from('iuran_kas')
-            .delete()
-            .eq('anggota_id', anggota_id)
-            .eq('tahun', tahun)
-            .eq('bulan', bulan);
-          if (error) throw new Error(error.message);
-        } else {
-          const store = this.getDemoStore();
-          store.iuran_kas = store.iuran_kas.filter(
-            (x) => !(x.anggota_id === anggota_id && x.tahun === tahun && x.bulan === bulan)
-          );
-          this.saveDemoStore(store);
-        }
+        const { error } = await this.client
+          .from('iuran_kas')
+          .delete()
+          .eq('anggota_id', anggota_id)
+          .eq('tahun', tahun)
+          .eq('bulan', bulan);
+        if (error) throw new Error(error.message);
       },
 
       async upsertLebihBayar(record) {
-        if (this.mode === 'supabase') {
-          const { error } = await this.client
-            .from('saldo_lebih_bayar')
-            .upsert({ ...record, updated_at: new Date().toISOString() }, { onConflict: 'anggota_id,tahun' });
-          if (error) throw new Error(error.message);
-        } else {
-          const store = this.getDemoStore();
-          const idx = store.saldo_lebih_bayar.findIndex(
-            (x) => x.anggota_id === record.anggota_id && x.tahun === record.tahun
-          );
-          if (idx >= 0) store.saldo_lebih_bayar[idx] = { ...store.saldo_lebih_bayar[idx], ...record };
-          else store.saldo_lebih_bayar.push({ id: generateUuid(), ...record });
-          this.saveDemoStore(store);
-        }
+        const { error } = await this.client
+          .from('saldo_lebih_bayar')
+          .upsert({ ...record, updated_at: new Date().toISOString() }, { onConflict: 'anggota_id,tahun' });
+        if (error) throw new Error(error.message);
       },
 
       async insertRow(table, payload) {
-        if (this.mode === 'supabase') {
-          const { data, error } = await this.client.from(table).insert(payload).select().single();
-          if (error) throw new Error(error.message);
-          return data;
-        } else {
-          const store = this.getDemoStore();
-          const row = { id: generateUuid(), ...payload };
-          store[table].push(row);
-          this.saveDemoStore(store);
-          return row;
-        }
+        const { data, error } = await this.client.from(table).insert(payload).select(table==='anggota'?memberColumns:'*').single();
+        if (error) throw new Error(error.message);
+        return data;
       },
 
       async insertRows(table, payloads) {
         if (!payloads.length) return;
-        if (this.mode === 'supabase') {
-          const { error } = await this.client.from(table).insert(payloads);
-          if (error) throw new Error(error.message);
-        } else {
-          const store = this.getDemoStore();
-          payloads.forEach((p) => store[table].push({ id: generateUuid(), ...p }));
-          this.saveDemoStore(store);
-        }
+        const { error } = await this.client.from(table).insert(payloads);
+        if (error) throw new Error(error.message);
       },
 
       async updateRow(table, id, payload) {
-        if (this.mode === 'supabase') {
-          const { error } = await this.client.from(table).update(payload).eq('id', id);
-          if (error) throw new Error(error.message);
-        } else {
-          const store = this.getDemoStore();
-          const idx = store[table].findIndex((x) => x.id === id);
-          if (idx >= 0) store[table][idx] = { ...store[table][idx], ...payload };
-          this.saveDemoStore(store);
-        }
+        const { error } = await this.client.from(table).update(payload).eq('id', id);
+        if (error) throw new Error(error.message);
       },
 
       async deleteRow(table, id) {
-        if (this.mode === 'supabase') {
-          const { error } = await this.client.from(table).delete().eq('id', id);
-          if (error) throw new Error(error.message);
-        } else {
-          const store = this.getDemoStore();
-          store[table] = store[table].filter((x) => x.id !== id);
-          // Cascade manual di mode demo
-          if (table === 'anggota') {
-            store.iuran_kas = store.iuran_kas.filter((x) => x.anggota_id !== id);
-            store.saldo_lebih_bayar = store.saldo_lebih_bayar.filter((x) => x.anggota_id !== id);
-          } else if (table === 'patungan_event') {
-            store.patungan_peserta = store.patungan_peserta.filter((x) => x.patungan_id !== id);
-          }
-          this.saveDemoStore(store);
-        }
+        const { error } = await this.client.from(table).delete().eq('id', id);
+        if (error) throw new Error(error.message);
       },
     };
 
@@ -1232,7 +549,7 @@ ON CONFLICT (username) DO NOTHING;
     };
 
     function isAdmin() {
-      return ['admin', 'it_support'].includes(State.session?.role);
+      return State.session?.role==='admin';
     }
 
     function getTarifForYear(tahun) {
@@ -1255,11 +572,11 @@ ON CONFLICT (username) DO NOTHING;
         const periode = State.data.periode_kas.find((p) => Number(p.tahun) === yr);
         const tarif = periode ? Number(periode.tarif_bulanan) : 0;
 
-        const totalIuran = State.data.iuran_kas
+        const totalIuran = State.data.aggregate ? Number(State.data.aggregate.iuran[yr]||0) : State.data.iuran_kas
           .filter((i) => Number(i.tahun) === yr)
           .reduce((acc, cur) => acc + (Number(cur.nominal) || 0), 0);
 
-        const totalLebihBayar = State.data.saldo_lebih_bayar
+        const totalLebihBayar = State.data.aggregate ? Number(State.data.aggregate.lebih[yr]||0) : State.data.saldo_lebih_bayar
           .filter((lb) => Number(lb.tahun) === yr)
           .reduce((acc, cur) => acc + (Number(cur.nominal) || 0), 0);
 
@@ -1296,6 +613,7 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function computePatunganStats(eventId) {
+      if(State.data.aggregate?.acara[eventId])return State.data.aggregate.acara[eventId];
       const ev = State.data.patungan_event.find((e) => e.id === eventId);
       if (!ev) return { terkumpul: 0, targetTotal: 0, pengeluaran: 0, selisih: 0, lunasCount: 0, totalPeserta: 0 };
       const list = State.data.patungan_peserta.filter((p) => p.patungan_id === eventId);
@@ -1316,7 +634,9 @@ ON CONFLICT (username) DO NOTHING;
         renderApp();
       }
       try {
+        const session=State.session;
         const fetched = await DB.fetchAll();
+        if(State.session!==session)return;
         State.data = fetched;
         const years = getAvailableYears();
         if (!years.includes(Number(State.selectedYear)) && years.length) {
@@ -1332,24 +652,17 @@ ON CONFLICT (username) DO NOTHING;
 
     async function bootstrap() {
       DB.init();
-      // Cek sesi tersimpan
-      try {
-        const saved = localStorage.getItem(STORAGE_KEYS.SESSION);
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (DB.mode === 'supabase' && ['admin', 'it_support'].includes(parsed.role)) {
-            const { data } = await DB.client.auth.getSession();
-            if (data?.session?.user.id === parsed.id && data.session) {
-              const support = data.session.user.app_metadata?.kas_role === 'it_support';
-              State.session = { ...parsed, role: support ? 'it_support' : 'admin' };
-            }
-            else localStorage.removeItem(STORAGE_KEYS.SESSION);
-          } else {
-            State.session = parsed;
-          }
-        }
-      } catch (_) {}
-
+      localStorage.removeItem(STORAGE_KEYS.DEMO_DB);
+      localStorage.removeItem(STORAGE_KEYS.SESSION);
+      if (DB.client) {
+        try {
+          const {data}=await DB.client.auth.getUser();
+          if(data.user) State.session=await rpcKas('identitas_kas');
+        } catch(e){showToast('Sesi belum dapat diverifikasi. Silakan masuk kembali.','error');}
+        DB.client.auth.onAuthStateChange((event)=>{
+          if(event==='SIGNED_OUT'){clearKasSession();renderApp();}
+        });
+      }
       if (State.session) {
         await refreshData();
       } else {
@@ -1427,7 +740,7 @@ ON CONFLICT (username) DO NOTHING;
        1. HALAMAN LOGIN (HYBRID AUTH GLASSMORPHISM)
     ============================================================================ */
     function renderLoginScreen() {
-      const isDemo = DB.mode === 'demo';
+
 
       return `
         <div class="w-full h-full overflow-y-auto flex flex-col items-center justify-center p-4 sm:p-6">
@@ -1457,7 +770,7 @@ ON CONFLICT (username) DO NOTHING;
                       required
                       autocomplete="username"
                       placeholder="Masukkan username atau email"
-                      value="${isDemo ? 'atika' : ''}"
+                      value=""
                       class="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-white/90 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25 focus:border-teal-600 transition"
                     />
                   </div>
@@ -1475,7 +788,7 @@ ON CONFLICT (username) DO NOTHING;
                       required
                       autocomplete="current-password"
                       placeholder="Masukkan password"
-                      value="${isDemo ? '123' : ''}"
+                      value=""
                       class="w-full pl-10 pr-12 py-3 rounded-xl border border-slate-200 bg-white/90 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-600/25 focus:border-teal-600 transition"
                     />
                     <button id="password-visibility" type="button" aria-controls="login-password" aria-label="Tampilkan kata sandi" title="Tampilkan kata sandi" onclick="togglePasswordVisibility(this)" class="absolute inset-y-0 right-1 w-10 flex items-center justify-center rounded-xl text-slate-600 hover:text-teal-700 focus-visible:ring-2 focus-visible:ring-teal-600">
@@ -1491,23 +804,10 @@ ON CONFLICT (username) DO NOTHING;
                   <i data-lucide="log-in" class="w-4 h-4"></i>
                   <span>Masuk</span>
                 </button>
+                <details class="text-sm text-teal-800"><summary class="cursor-pointer font-semibold">Aktivasi anggota / lupa kata sandi</summary><p class="my-2 text-slate-600">Minta kode pribadi kepada pengurus. Masukkan username, kata sandi baru minimal 10 karakter, dan kode di bawah, lalu pilih Masuk.</p><label>Kode pribadi<input id="login-code" class="w-full border rounded-xl p-2 mt-1" autocomplete="off"></label></details>
               </form>
 
-              ${
-                isDemo
-                  ? `
-                  <div class="mt-5 p-3.5 rounded-2xl bg-sky-50/80 border border-sky-200/70 text-xs text-sky-900 space-y-1.5">
-                    <div class="font-bold flex items-center gap-1.5 text-sky-800">
-                      <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
-                      <span>Akses Cepat Mode Demo</span>
-                    </div>
-                    <p class="text-sky-700 leading-relaxed">
-                      Kredensial demo sudah terisi otomatis. Anda dapat mencoba role <b>Admin</b> (edit/input penuh) maupun <b>Anggota</b> (<code class="bg-white/70 px-1 rounded">atika</code> / <code class="bg-white/70 px-1 rounded">123</code>).
-                    </p>
-                  </div>
-                `
-                  : ''
-              }
+
 
 
             </div>
@@ -1536,15 +836,12 @@ ON CONFLICT (username) DO NOTHING;
       }
 
       try {
-        const session =
-          identifier.trim().includes('@')
-            ? await DB.loginAdmin(identifier.trim(), password)
-            : await DB.loginAnggota(identifier, password);
+        const session = await loginKas(identifier.trim(),password,document.getElementById('login-code')?.value.trim());
 
         State.session = session;
         State.dashboardScope = 'personal';
         State.activePage = 'dashboard';
-        localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(session));
+        
         showToast(`Selamat datang, ${session.nama}!`, 'success');
         await refreshData();
       } catch (err) {
@@ -1561,7 +858,7 @@ ON CONFLICT (username) DO NOTHING;
         danger: true,
         onConfirm: async () => {
           await DB.logout();
-          State.session = null;
+          clearKasSession();
           resetAuditView();
           State.activePatunganId = null;
           showToast('Anda telah keluar.', 'info');
@@ -1580,16 +877,16 @@ ON CONFLICT (username) DO NOTHING;
         { id: 'transaksi', label: 'Buku Kas', short: 'Buku Kas', icon: 'arrow-left-right' },
         { id: 'patungan', label: 'Patungan & Acara', short: 'Patungan', icon: 'heart-handshake' },
       ];
-      if (isAdmin()) {
+      {
         items.push({ id: 'laporan', label: 'Laporan Anggota', short: 'Laporan', icon: 'file-text' });
-        items.push({ id: 'pengaturan', label: 'Anggota & Sistem', short: 'Kelola', icon: 'settings' });
+        if(staffAccess())items.push({ id: 'pengaturan', label: 'Anggota & Sistem', short: 'Kelola', icon: 'settings' });
       }
       return items;
     }
 
     function navigateTo(pageId) {
       State.activePage = pageId;
-      if (pageId==='pengaturan' && State.settingsTab==='log' && isAdmin()) { loadAuditPage(); return; }
+      if (pageId==='pengaturan' && State.settingsTab==='log' && staffAccess()) { loadAuditPage(); return; }
       if (pageId !== 'patungan') State.activePatunganId = null;
       renderApp();
       const scroller = document.getElementById('main-scroll-area');
@@ -1599,7 +896,7 @@ ON CONFLICT (username) DO NOTHING;
     function renderShell() {
       const navItems = getNavItems();
       const admin = isAdmin();
-      const isDemo = DB.mode === 'demo';
+
       const pageTitles = {
         dashboard: 'Dashboard & Rekap Tahunan',
         iuran: 'Matriks Iuran Kas 12 Bulan',
@@ -1620,8 +917,8 @@ ON CONFLICT (username) DO NOTHING;
             <div class="min-w-0">
               <div class="text-base font-extrabold tracking-tight text-slate-900 leading-tight">KAS IPD 32</div>
               <div class="flex items-center gap-1.5 mt-0.5">
-                <span class="w-1.5 h-1.5 rounded-full ${isDemo ? 'bg-amber-500' : 'bg-emerald-500'}"></span>
-                <span class="text-[11px] font-semibold text-slate-500 truncate">${isDemo ? 'Mode Demo Lokal' : 'Supabase Live'}</span>
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                <span class="text-[11px] font-semibold text-slate-500 truncate">Supabase Live</span>
               </div>
             </div>
           </div>
@@ -1658,7 +955,7 @@ ON CONFLICT (username) DO NOTHING;
               <div class="min-w-0 flex-1">
                 <div class="text-xs font-bold text-slate-900 truncate">${escapeHtml(State.session.nama)}</div>
                 <div class="text-[11px] font-semibold ${admin ? 'text-teal-700' : 'text-sky-600'}">
-                  ${admin ? 'Admin / Bendahara' : 'Anggota (Read-Only)'}
+                  ${admin ? 'Admin / Bendahara' : staffAccess() ? 'IT Support' : 'Anggota'}
                 </div>
               </div>
             </div>
@@ -1682,7 +979,7 @@ ON CONFLICT (username) DO NOTHING;
               <div class="min-w-0">
                 <div class="text-sm font-extrabold text-slate-900 truncate">${pageTitles[State.activePage] || 'KAS IPD 32'}</div>
                 <div class="text-[11px] text-slate-500 truncate">
-                  ${escapeHtml(State.session.nama)} • ${admin ? 'Admin' : 'Anggota'}
+                  ${escapeHtml(State.session.nama)} • ${admin ? 'Admin' : staffAccess() ? 'IT Support' : 'Anggota'}
                 </div>
               </div>
             </div>
@@ -1711,7 +1008,7 @@ ON CONFLICT (username) DO NOTHING;
                   : State.activePage === 'patungan'
                   ? renderPatunganPage()
                   : State.activePage === 'laporan'
-                  ? renderReportPage()
+                  ? financialReports()
                   : renderPengaturanPage()
               }
             </div>
@@ -1719,7 +1016,7 @@ ON CONFLICT (username) DO NOTHING;
 
           <!-- MOBILE FLOATING BOTTOM NAVIGATION BAR (< 1024px) -->
           <nav class="lg:hidden fixed bottom-3 left-3 right-3 z-40 rounded-2xl bg-white/90 backdrop-blur-xl border border-slate-200/80 shadow-float px-2 py-1.5">
-            <div class="grid ${navItems.length === 6 ? 'grid-cols-6' : 'grid-cols-4'} gap-1">
+            <div class="grid ${navItems.length === 6 ? 'grid-cols-6' : 'grid-cols-5'} gap-1">
               ${navItems
                 .map((item) => {
                   const active = State.activePage === item.id;
@@ -1867,7 +1164,7 @@ ON CONFLICT (username) DO NOTHING;
               </div>
               <div class="flex items-baseline gap-2">
                 <span class="text-xl sm:text-2xl font-extrabold tabular-nums text-slate-900">${progressPct}%</span>
-                <span class="text-xs font-semibold text-slate-500">${activeMembers.length} aktif</span>
+                <span class="text-xs font-semibold text-slate-500">${personalMember?'Iuran saya':activeMembers.length+' aktif'}</span>
               </div>
               <div class="w-full h-2 rounded-full bg-slate-100 mt-2 overflow-hidden">
                 <div class="h-full rounded-full bg-gradient-to-r from-teal-600 to-sky-500 transition-all" style="width:${progressPct}%"></div>
@@ -2138,7 +1435,7 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function renderReportPage() {
-      if (!isAdmin()) return '';
+      if (!staffAccess()) return '';
       const reportYear = State.reportYear ?? Number(State.selectedYear);
       const year = reportYear || getAvailableYears().at(-1);
       const month = reportYear ? State.reportMonth : 0;
@@ -2156,7 +1453,7 @@ ON CONFLICT (username) DO NOTHING;
       });
       const selected = month ? [months[month - 1]] : months;
       const opening = annual.saldoKumulatif - annual.saldoTahun + months.filter(m => m.num < month).reduce((s,m) => s + m.net, 0);
-      const income = selected.reduce((s,m) => s + m.iuran + m.other, month ? 0 : annual.totalLebihBayar);
+      const income = selected.reduce((s,m) => s + m.iuran + m.other, month && month!==12 ? 0 : annual.totalLebihBayar);
       const spent = selected.reduce((s,m) => s + m.spent, 0);
       const summary = [
         ['Saldo awal', opening, 'wallet', 'bg-sky-50 text-sky-700'],
@@ -2174,7 +1471,7 @@ ON CONFLICT (username) DO NOTHING;
       const selectStyle = 'rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 focus:ring-2 focus:ring-teal-600/25';
       return `<div class="space-y-5 animate-fade-up">
         <div class="report-banner ${State.reportMember?'personal-banner':'general-banner'}">
-          <div><h1>Laporan Anggota</h1><p>${State.reportMember?'Tagihan per anggota':'Rekap kas ruangan'} · ${periodLabel}</p></div>
+          <div><h1>Laporan Anggota</h1><p>${State.reportMember?'Tagihan per anggota':'Draf rekap kas ruangan'} · ${periodLabel}</p></div>
           <button class="inline-flex items-center justify-center gap-2 self-start sm:self-auto px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 text-teal-900 text-xs font-bold shadow-sm transition active:scale-[0.98]" onclick="printMemberReport()"><i data-lucide="printer" class="w-4 h-4"></i>Cetak / Simpan PDF</button>
         </div>
         <div class="glass-card rounded-2xl p-4 grid grid-cols-2 sm:flex sm:items-end gap-3">
@@ -2183,13 +1480,13 @@ ON CONFLICT (username) DO NOTHING;
           <label class="grid gap-1.5 text-xs font-semibold text-slate-500 col-span-2">Jenis laporan<select class="${selectStyle}" onchange="State.reportMember=this.value;renderApp()"><option value="">Rekap kas bersama</option>${State.data.anggota.map(m=>`<option value="${escapeHtml(m.id)}" ${State.reportMember===m.id?'selected':''}>Tagihan · ${escapeHtml(m.nama)}</option>`).join('')}</select></label>
         </div>
         <article id="member-report" class="space-y-4">
-        <header class="hidden"><h2>Laporan Kas IPD 32</h2><p>${periodLabel} · Disusun ${new Date().toLocaleDateString('id-ID')}</p></header>
+        <header class="hidden"><h2>Draf laporan kas IPD 32</h2><p>${periodLabel} · Disusun ${new Date().toLocaleDateString('id-ID')}</p></header>
         ${State.reportMember ? memberBalanceCard(State.data.anggota.find(m=>m.id===State.reportMember),reportYear,month||12) : !reportYear ? reportTable('Rekap kas semua tahun',['Tahun','Pemasukan','Pengeluaran','Saldo tahun','Saldo kumulatif'],computeAnnualRecap().rows.map(r=>[r.tahun,formatRp(r.totalMasuk),formatRp(r.totalKeluar),formatRp(r.saldoTahun),formatRp(r.saldoKumulatif)])) : `<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">${summary.map(([label,v,icon,tone])=>`<div class="report-tile ${tone}">
           <div class="flex items-center justify-between gap-1 mb-3"><span class="text-[11px] font-bold uppercase tracking-wider text-slate-500">${label}</span>
           <span aria-hidden="true" class="w-7 h-7 sm:w-9 sm:h-9 shrink-0 rounded-xl flex items-center justify-center ${tone}"><i data-lucide="${icon}" class="w-4 h-4"></i></span></div>
           <strong class="text-base sm:text-xl xl:text-2xl font-extrabold tabular-nums ${v < 0 ? 'text-rose-700' : 'text-slate-900'}">${formatRp(v)}</strong></div>`).join('')}</div>
-        ${reportTable('Arus kas', ['Bulan','Iuran','Masuk lain','Keluar','Selisih'],selected.map(m=>[m.full,...[m.iuran,m.other,m.spent,m.net].map(v=>formatRp(v))]), '', (v,col,row)=>col===3 ? `<button class="text-teal-700 underline" onclick="openExpenseMonth(${year},${selected[row].num})" title="Rincian pengeluaran ${selected[row].full}">${escapeHtml(v)}</button>` : null)}
-        <p class="text-sm">${month ? 'Saldo bulanan mencakup transaksi yang memiliki bulan. Lebih bayar tahun berjalan ditambahkan pada rekap tahunan.' : `Lebih bayar tahunan ${formatRp(annual.totalLebihBayar)} sudah termasuk dalam pemasukan dan saldo akhir.`}</p>
+        ${reportTable('Arus kas', ['Bulan','Iuran','Masuk lain','Keluar','Lebih bayar','Selisih'],selected.map(m=>[m.full,...[m.iuran,m.other,m.spent,m.num===12?annual.totalLebihBayar:0,m.net+(m.num===12?annual.totalLebihBayar:0)].map(v=>formatRp(v))]), '', (v,col,row)=>col===3 ? `<button class="text-teal-700 underline" onclick="openExpenseMonth(${year},${selected[row].num})" title="Rincian pengeluaran ${selected[row].full}">${escapeHtml(v)}</button>` : null)}
+        <p class="text-sm">${month ? 'Lebih bayar tahunan dicatat pada Desember.' : `Lebih bayar tahunan ${formatRp(annual.totalLebihBayar)} sudah termasuk dalam pemasukan dan saldo akhir.`}</p>
         ${reportTable('Penggunaan dana', ['Kategori','Jumlah'], [...categories].sort((a,b)=>b[1]-a[1]).map(([k,v])=>[k,formatRp(v)]),'Belum ada pengeluaran tercatat pada periode ini.')}
         ${month ? '' : reportTable('Patungan acara', ['Acara','Terkumpul','Biaya','Selisih'],events.map(e=>{const stats=computePatunganStats(e.id);return [e.nama_event,formatRp(stats.terkumpul),formatRp(stats.pengeluaran),formatRp(stats.selisih)];}),'Belum ada acara tercatat pada tahun ini.')}
         ${!month && events.length ? '<p class="text-sm">Dampak patungan pada saldo mengikuti transaksi yang tercatat di Buku Kas.</p>' : ''}`}</article></div>`;
@@ -2197,7 +1494,7 @@ ON CONFLICT (username) DO NOTHING;
 
     function printMemberReport() {
       const report = document.getElementById('member-report');
-      if (!isAdmin() || !report) return;
+      if (!State.session || !report) return;
       const preview = window.open('', '_blank');
       if (!preview) return showToast('Izinkan jendela cetak untuk menyimpan PDF.', 'error');
       const doc = preview.document;
@@ -3387,19 +2684,8 @@ ON CONFLICT (username) DO NOTHING;
         } else {
           const id=form.dataset.eventId;
           const ids=Array.from(form.querySelectorAll('#event-members input:checked'),input=>input.value);
-          if (DB.mode==='supabase') {
-            const {error}=await DB.client.rpc('buat_patungan_dengan_anggota',{p_id:id,p_acara:payload,p_anggota:ids});
-            if(error) throw error;
-          } else {
-            const data=DB.getDemoStore();
-            if (!data.patungan_event.some(ev=>ev.id===id)) {
-              const members=data.anggota.filter(m=>ids.includes(m.id));
-              if(members.length!==ids.length) throw Error('Daftar anggota berubah. Periksa pilihan peserta.');
-              data.patungan_event.push({...payload,id,terposting_ke_kas:false});
-              data.patungan_peserta.push(...members.map(m=>({id:generateUuid(),patungan_id:id,anggota_id:m.id,nama_peserta:m.nama,keterangan:m.peran,tarif_target:payload.tarif_default,nominal_bayar:0,status_bayar:payload.tarif_default?'Belum Bayar':'Lunas'})));
-              DB.saveDemoStore(data);
-            }
-          }
+          const {error}=await DB.client.rpc('buat_patungan_dengan_anggota',{p_id:id,p_acara:payload,p_anggota:ids});
+          if(error) throw error;
           State.activePatunganId = id;
           showToast('Event patungan berhasil dibuat.', 'success');
         }
@@ -3595,19 +2881,8 @@ ON CONFLICT (username) DO NOTHING;
         const submit=e.currentTarget.querySelector('button:not([type])');
         submit.disabled=true;
         try {
-          if(DB.mode==='supabase'){
-            const {error}=await DB.client.rpc('posting_patungan',{p_event:eventId,p_tanggal:date});
-            if(error)throw error;
-          }else{
-            const data=DB.getDemoStore();
-            const item=data.patungan_event.find(x=>x.id===eventId);
-            if(!item.terposting_ke_kas){
-              for(const [nominal,tipe,kategori] of [[subsidy,'keluar','Defisit Patungan'],[surplus,'masuk_lain','Sisa Patungan']]){
-                if(nominal>0)data.transaksi_kas.push({id:generateUuid(),tahun:ev.tahun,bulan:Number(date.slice(5,7)),tanggal:date,tipe,kategori,deskripsi:`${kategori} — ${ev.nama_event}`,nominal,patungan_id:eventId});
-              }
-              Object.assign(item,{terposting_ke_kas:true,status:'Selesai'});DB.saveDemoStore(data);
-            }
-          }
+          const {error}=await DB.client.rpc('posting_patungan',{p_event:eventId,p_tanggal:date});
+          if(error)throw error;
           closeModal();await refreshData(true);showToast('Posting acara tersimpan.','success');
         }catch(err){submit.disabled=false;showToast(err.message,'error');}
       };
@@ -3637,7 +2912,7 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     async function loadAuditPage(direction='latest') {
-      if(!isAdmin())return;
+      if(!staffAccess())return;
       const state=auditView;
       if(direction==='latest'){
         state.loading=false;
@@ -3665,13 +2940,13 @@ ON CONFLICT (username) DO NOTHING;
       }finally{
         if(request===state.request){
           state.loading=false;
-          if(isAdmin() && State.activePage==='pengaturan' && State.settingsTab==='log')renderApp();
+          if(staffAccess() && State.activePage==='pengaturan' && State.settingsTab==='log')renderApp();
         }
       }
     }
 
     function renderAuditTab() {
-      if(!isAdmin())return '';
+      if(!staffAccess())return '';
       const {rows,loading,error,older,cursors}=auditView;
       const formatValue=(key,value)=>{
         if(value==null)return '—';
@@ -3708,7 +2983,7 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function renderPengaturanPage() {
-      if (!isAdmin()) {
+      if (!staffAccess()) {
         return `<div class="glass-card rounded-2xl p-10 text-center text-sm text-slate-500">Halaman ini khusus untuk Admin / Bendahara IPD 32.</div>`;
       }
 
@@ -3771,7 +3046,7 @@ ON CONFLICT (username) DO NOTHING;
                 placeholder="Cari nama atau username..."
                 class="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-teal-600/25" />
             </div>
-            <button onclick="openMemberModal()" class="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm">
+            <button ${isAdmin()?'':'hidden'} onclick="openMemberModal()" class="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm">
               <i data-lucide="user-plus" class="w-4 h-4"></i>
               <span>Tambah Anggota</span>
             </button>
@@ -3798,8 +3073,7 @@ ON CONFLICT (username) DO NOTHING;
                     </td>
                     <td class="py-3 px-4 text-xs">
                       <span class="px-2 py-0.5 rounded bg-slate-100 font-mono text-slate-700">${escapeHtml(m.username)}</span>
-                      <span class="text-slate-400 mx-1">/</span>
-                      <span class="font-mono text-slate-500">${escapeHtml(m.password)}</span>
+                      <button class="text-teal-700 font-semibold ml-2" onclick="memberCode('${m.id}')">Kode akses</button>
                     </td>
                     <td class="py-3 px-4">
                       <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
@@ -3811,8 +3085,8 @@ ON CONFLICT (username) DO NOTHING;
                       ${m.aktif_sejak ? `<div class="text-[11px] text-slate-400">Sejak ${escapeHtml(m.aktif_sejak)}</div>` : ''}
                     </td>
                     <td class="py-3 px-4 text-right whitespace-nowrap">
-                      <button onclick="openMemberModal('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-teal-700"><i data-lucide="pencil" class="w-4 h-4"></i></button>
-                      <button onclick="deleteMember('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                      <button ${isAdmin()?'':'hidden'} onclick="openMemberModal('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-teal-700"><i data-lucide="pencil" class="w-4 h-4"></i></button>
+                      <button ${isAdmin()?'':'hidden'} onclick="deleteMember('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
                     </td>
                   </tr>
                 `
@@ -3837,6 +3111,7 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function openMemberModal(editId = null) {
+      if(!isAdmin())return;
       const m = editId ? State.data.anggota.find((x) => x.id === editId) : null;
       openModal(`
         <div class="p-5 border-b border-slate-200 flex items-center justify-between">
@@ -3865,11 +3140,7 @@ ON CONFLICT (username) DO NOTHING;
               <input id="mem-user" type="text" required value="${escapeHtml(m?.username || '')}" placeholder="huruf kecil tanpa spasi"
                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-mono" />
             </div>
-            <div>
-              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Password Login</label>
-              <input id="mem-pass" type="text" required value="${escapeHtml(m?.password || 'ipd32')}"
-                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-mono" />
-            </div>
+            
           </div>
           <div class="grid grid-cols-2 gap-3">
             <div>
@@ -3903,7 +3174,7 @@ ON CONFLICT (username) DO NOTHING;
         nama: document.getElementById('mem-nama').value.trim(),
         peran: document.getElementById('mem-peran').value,
         username: document.getElementById('mem-user').value.trim().toLowerCase(),
-        password: document.getElementById('mem-pass').value.trim(),
+
         status: document.getElementById('mem-status').value,
         aktif_sejak: document.getElementById('mem-sejak').value.trim(),
         catatan_status: document.getElementById('mem-catatan').value.trim(),
@@ -3924,6 +3195,7 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function deleteMember(id) {
+      if(!isAdmin())return;
       openConfirmModal({
         title: 'Hapus Anggota Ini?',
         message: 'Jika anggota resign/mutasi, disarankan ubah status menjadi "Resign/Mutasi" agar riwayat iuran historis tetap tersimpan. Yakin ingin menghapus permanen?',
@@ -3947,12 +3219,12 @@ ON CONFLICT (username) DO NOTHING;
 
     function deleteEmptyPeriod(id) {
       if(!isAdmin())return;
+      if(!isAdmin())return;
       const period=State.data.periode_kas.find(p=>p.id===id);
       if(!period)return;
       if(periodHasData(State.data,period.tahun))return showToast('Periode ini masih memiliki data.','error');
       openConfirmModal({title:`Hapus periode ${period.tahun}?`,message:'Periode beserta tarif akan dihapus jika masih kosong.',confirmLabel:'Hapus periode kosong',danger:true,onConfirm:async()=>{
         try{
-          if(DB.mode==='demo' && periodHasData(DB.getDemoStore(),period.tahun))throw Error('Periode sudah memiliki data.');
           await DB.deleteRow('periode_kas',id);await refreshData(true);showToast('Periode kosong dihapus.','success');
         }catch(err){showToast(err.code==='23503'?'Periode sudah berisi data dan dilindungi.':err.message,'error');}
       }});
@@ -3967,7 +3239,7 @@ ON CONFLICT (username) DO NOTHING;
               <h2 class="text-base font-bold text-slate-900">Periode & Tarif Iuran Bulanan</h2>
               <p class="text-xs text-slate-500 mt-0.5">Tambahkan tahun buku baru beserta besaran iuran per bulan</p>
             </div>
-            <button onclick="openPeriodeModal()" class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm">
+            <button ${isAdmin()?'':'hidden'} onclick="openPeriodeModal()" class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-semibold shadow-sm">
               <i data-lucide="plus" class="w-4 h-4"></i>
               <span>Tambah Tahun</span>
             </button>
@@ -3984,9 +3256,9 @@ ON CONFLICT (username) DO NOTHING;
                   </div>
                   <div class="text-xs text-slate-500 mt-1">${escapeHtml(p.keterangan || '—')}</div>
                 </div>
-                <div class="flex flex-wrap gap-2"><button onclick="openPeriodeModal('${p.id}')" class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700">
+                <div class="flex flex-wrap gap-2"><button ${isAdmin()?'':'hidden'} onclick="openPeriodeModal('${p.id}')" class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700">
                   Edit Tarif
-                </button><button ${periodHasData(State.data,p.tahun)?'disabled title="Tahun sudah berisi data"':''} onclick="deleteEmptyPeriod('${p.id}')" class="text-xs rounded-xl px-3 py-2 text-rose-700 bg-rose-50 disabled:opacity-50">${periodHasData(State.data,p.tahun)?'Terisi · terkunci':'Hapus periode'}</button></div>
+                </button><button ${isAdmin()?'':'hidden'} ${periodHasData(State.data,p.tahun)?'disabled title="Tahun sudah berisi data"':''} onclick="deleteEmptyPeriod('${p.id}')" class="text-xs rounded-xl px-3 py-2 text-rose-700 bg-rose-50 disabled:opacity-50">${periodHasData(State.data,p.tahun)?'Terisi · terkunci':'Hapus periode'}</button></div>
               </div>
             `
               )
@@ -3997,6 +3269,7 @@ ON CONFLICT (username) DO NOTHING;
     }
 
     function openPeriodeModal(editId = null) {
+      if(!isAdmin())return;
       const p = editId ? State.data.periode_kas.find((x) => x.id === editId) : null;
       const nextYear = Math.max(2026, ...getAvailableYears()) + 1;
       openModal(`
@@ -4201,13 +3474,13 @@ ON CONFLICT (username) DO NOTHING;
         <h2 class="font-bold">Sistem &amp; Backup</h2>
         <p>Lingkungan: ${DB.mode === 'demo' ? 'DEMO' : isProduction ? 'PROD' : 'DEV'}</p>
         <button class="btn px-3 py-2 border rounded-xl" onclick="exportBackupJson()">Unduh backup JSON</button>
-        <button class="btn px-3 py-2 border rounded-xl" onclick="copyTextToClipboard(SUPABASE_SQL_SCRIPT, 'SQL disalin')">Salin skrip SQL</button>
+
       </section>`;
     }
 
     function exportBackupJson() {
       if (State.session?.role !== 'it_support') return;
-      const blob = new Blob([JSON.stringify(State.data, null, 2)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify(State.data, (k,v)=>k==='password'?undefined:v, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -4225,5 +3498,6 @@ ON CONFLICT (username) DO NOTHING;
     // Jalankan aplikasi saat DOM siap
     window.addEventListener('DOMContentLoaded', bootstrap);
   </script>
+  <script src="./kas-bulanan.js"></script>
 </body>
 </html>

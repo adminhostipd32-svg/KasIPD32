@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>DEV - KAS IPD 32 — Sistem Manajemen Kas & Patungan</title>
+  <meta name="kas-environment" content="development" />
+  <title>KAS IPD 32 — Sistem Manajemen Kas & Patungan</title>
 
   <!-- Google Fonts: Plus Jakarta Sans & Inter -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -157,8 +158,7 @@
        atau masukkan langsung lewat tombol "Konfigurasi Supabase" di layar Login.
        Jika dibiarkan kosong, aplikasi otomatis berjalan dalam Mode Demo Interaktif.
     ============================================================================ */
-const PROD_DOMAINS = ["kasipd32.vercel.app"];
-const isProduction = PROD_DOMAINS.includes(window.location.hostname);
+const isProduction = document.querySelector('meta[name="kas-environment"]').content === 'production';
 
 const DEFAULT_SUPABASE_URL = isProduction
   ? "https://blplhbwuteteuojxzkmk.supabase.co/rest/v1/"
@@ -651,13 +651,17 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
     }
 
     async function bootstrap() {
+      let setupSupportPassword = false;
       DB.init();
       localStorage.removeItem(STORAGE_KEYS.DEMO_DB);
       localStorage.removeItem(STORAGE_KEYS.SESSION);
       if (DB.client) {
         try {
           const {data}=await DB.client.auth.getUser();
-          if(data.user) State.session=await rpcKas('identitas_kas');
+          if(data.user) {
+            State.session=await rpcKas('identitas_kas');
+            setupSupportPassword = State.session?.role === 'it_support' && data.user.user_metadata?.kas_perlu_sandi === true;
+          }
         } catch(e){showToast('Sesi belum dapat diverifikasi. Silakan masuk kembali.','error');}
         DB.client.auth.onAuthStateChange((event)=>{
           if(event==='SIGNED_OUT'){clearKasSession();renderApp();}
@@ -665,6 +669,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
       }
       if (State.session) {
         await refreshData();
+        if (setupSupportPassword) openSupportPasswordSetup();
       } else {
         renderApp();
       }

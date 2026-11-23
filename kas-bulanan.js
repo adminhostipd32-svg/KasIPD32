@@ -43,6 +43,26 @@ function clearKasSession() {
   closeModal();
 }
 
+function openSupportPasswordSetup() {
+  openModal(`<form id="support-setup" class="p-5 space-y-4">
+    <h2 class="text-lg font-bold">Buat kata sandi IT Support</h2>
+    <p class="text-sm">Gunakan kata sandi ini untuk masuk kembali dengan email IT Support.</p>
+    <label class="block">Kata sandi baru<input class="${fieldStyle}" name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+    <label class="block">Ulangi kata sandi<input class="${fieldStyle}" name="confirm" type="password" autocomplete="new-password" required></label>
+    <p class="text-rose-700" role="alert"></p><button class="${primaryStyle}" type="submit">Simpan kata sandi</button></form>`);
+  document.getElementById('support-setup').onsubmit = async event => {
+    event.preventDefault();
+    const form=event.currentTarget, alert=form.querySelector('[role=alert]'), button=form.querySelector('button');
+    if(form.elements.password.value!==form.elements.confirm.value){alert.textContent='Kedua kata sandi harus sama.';return;}
+    button.disabled=true;
+    try {
+      const {error}=await DB.client.auth.updateUser({password:form.elements.password.value,data:{kas_perlu_sandi:false}});
+      if(error)throw error;
+      closeModal();showToast('Kata sandi IT Support tersimpan.','success');
+    } catch(error){alert.textContent=error.message;button.disabled=false;}
+  };
+}
+
 async function periksaLaporan(button) {
   const y=Number(button.previousElementSibling.value);
   const panel=button.parentElement.nextElementSibling;

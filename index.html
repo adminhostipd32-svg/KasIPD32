@@ -1336,9 +1336,29 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
     /* ============================================================================
        4. PAGE: MATRIKS IURAN KAS 12 BULAN
     ============================================================================ */
+    function joinDateParts(value) {
+      const raw = String(value || '').trim();
+      const exact = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+      if (exact) return { year: Number(exact[1]), month: Number(exact[2]), day: Number(exact[3]), iso: raw };
+      // Older profiles recorded a month/year or only a year. Keep their original precision.
+      const year = /\b(\d{4})\b/.exec(raw);
+      const month = MONTHS.find(m => raw.toLowerCase().includes(m.full.toLowerCase()));
+      return { year: year ? Number(year[1]) : 0, month: month?.num || 1, day: null, iso: '' };
+    }
+
+    function firstDuesMonth(member, year) {
+      const start = joinDateParts(member.aktif_sejak);
+      if (year < start.year) return 13;
+      return year === start.year ? start.month : 1;
+    }
+
+    function joinDateLabel(value) {
+      const d = joinDateParts(value);
+      return d.iso ? d.day + ' ' + MONTHS[d.month-1]?.full + ' ' + d.year : value || '';
+    }
+
     function membershipForYear(member, year) {
-      const joined = /\b(20\d{2})\b/.exec(member.aktif_sejak || '');
-      if (joined && Number(joined[1]) > year) return null;
+      if (firstDuesMonth(member, year) > 12) return null;
       const years = (member.catatan_status || '').match(/\b20\d{2}\b/g) || [];
       const left = /\b(?:resign|mutasi|pindah|keluar|tidak aktif setelah)\b[^.;\n]{0,45}?\b(20\d{2})\b/i.exec(member.catatan_status || '');
       if (member.status !== 'Aktif' && left && years.length === 1) {
@@ -1349,8 +1369,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
     }
 
     function memberDues(member, year, rate, today = new Date()) {
-      const start = String(member.aktif_sejak || '').toLowerCase();
-      const first = start.includes(String(year)) ? MONTHS.find(m => start.includes(m.full.toLowerCase()))?.num || 1 : 1;
+      const first = firstDuesMonth(member, year);
       const last = year === today.getFullYear() ? today.getMonth() + 1 : year < today.getFullYear() ? 12 : 0;
       const paid = new Map(State.data.iuran_kas
         .filter(i => i.anggota_id === member.id && Number(i.tahun) === year)
@@ -1536,7 +1555,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
       const searchQ = State.iuranSearch.trim().toLowerCase();
       const eligible = State.data.anggota
         .map(member => ({ ...member, status: membershipForYear(member, activeYr) }))
-        .filter(member => member.status)
+        .filter(member => member.status || lebihMap[member.id] || MONTHS.some(m => iuranMap[`${member.id}_${m.num}`]))
         .map((m) => {
           const due = memberDues(m, activeYr, tarif, new Date(activeYr, 11, 31));
           let totalBayar = 0;
@@ -1549,10 +1568,10 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
           const lebihObj = lebihMap[m.id];
           const lebihNominal = lebihObj ? Number(lebihObj.nominal) : 0;
           const derivedStatus =
-            m.status !== 'Aktif' ? m.status : !due.length ? 'Belum jatuh tempo' :
+            !m.status ? 'Riwayat setoran' : m.status !== 'Aktif' ? m.status : !due.length ? 'Belum jatuh tempo' :
             due.some(month => month.remaining > 0) ? 'Kurang Bayar' : 'Lunas';
 
-          return { member: m, totalBayar, lebihNominal, lebihObj, derivedStatus };
+          return { member: m, totalBayar, lebihNominal, lebihObj, derivedStatus, firstMonth: firstDuesMonth(m, activeYr) };
         });
       const rows = eligible.filter((r) => {
           if (searchQ && !r.member.nama.toLowerCase().includes(searchQ)) return false;
@@ -1560,7 +1579,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
           if (State.iuranStatusFilter === 'Aktif') return r.member.status === 'Aktif';
           if (State.iuranStatusFilter === 'Lunas') return r.derivedStatus === 'Lunas';
           if (State.iuranStatusFilter === 'Kurang Bayar') return r.derivedStatus === 'Kurang Bayar';
-          if (State.iuranStatusFilter === 'Non-Aktif') return r.member.status !== 'Aktif';
+          if (State.iuranStatusFilter === 'Non-Aktif') return !!r.member.status && r.member.status !== 'Aktif';
           return true;
         });
 
@@ -1614,9 +1633,9 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
           </div>
 
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-            ${[['Total anggota', eligible.length], ['Lunas s.d. Desember', eligible.filter(r => r.derivedStatus === 'Lunas').length],
+            ${[['Total anggota', eligible.filter(r => r.member.status).length], ['Lunas s.d. Desember', eligible.filter(r => r.derivedStatus === 'Lunas').length],
               ['Kurang bayar', eligible.filter(r => r.derivedStatus === 'Kurang Bayar').length],
-              ['Nonaktif', eligible.filter(r => r.member.status !== 'Aktif').length]].map(([label, value]) =>
+              ['Nonaktif', eligible.filter(r => r.member.status && r.member.status !== 'Aktif').length]].map(([label, value]) =>
               `<div class="glass-card rounded-xl p-3"><p class="text-xs text-slate-500">${label}</p><strong>${value}</strong></div>`).join('')}
           </div>
           <!-- Top Action & Filter Bar -->
@@ -1686,7 +1705,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                           .map((r, idx) => {
                             const isSelf = !admin && State.session?.id === r.member.id;
                             return `
-                              <tr data-member="${escapeHtml(r.member.id)}" data-status="${escapeHtml(r.member.status)}" data-payment-status="${escapeHtml(r.derivedStatus)}" class="${isSelf ? 'bg-teal-50/40' : 'hover:bg-slate-50/70'} transition">
+                              <tr data-member="${escapeHtml(r.member.id)}" data-status="${escapeHtml(r.member.status || 'Belum masuk')}" data-payment-status="${escapeHtml(r.derivedStatus)}" class="${isSelf ? 'bg-teal-50/40' : 'hover:bg-slate-50/70'} transition">
                                 <td class="sticky left-0 z-10 ${isSelf ? 'bg-teal-50/95' : 'bg-white'} py-2.5 px-3 text-center font-semibold text-slate-400 tabular-nums">
                                   ${idx + 1}
                                 </td>
@@ -1705,6 +1724,8 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                                 ${MONTHS.map((m) => {
                                   const cell = iuranMap[`${r.member.id}_${m.num}`];
                                   const nominal = cell ? Number(cell.nominal) : 0;
+                                  const beforeJoining = m.num < r.firstMonth;
+                                  if (beforeJoining && !nominal) return '<td class="text-center text-xs text-slate-400" title="Belum masuk pada bulan ini">Belum masuk</td>';
                                   const isAnomaly = nominal > 0 && nominal > tarif * 2;
                                   const clickable = admin
                                     ? `onclick="openIuranCellModal('${r.member.id}', ${activeYr}, ${m.num})"`
@@ -1715,12 +1736,12 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                                         <div ${clickable} title="${
                                           isAnomaly ? 'Perhatian: Nominal melebihi 2x tarif bulanan!' : formatRp(nominal)
                                         }" class="mx-auto py-1.5 px-1 rounded-lg font-bold tabular-nums text-[11px] transition ${
-                                          isAnomaly || nominal < tarif
+                                          isAnomaly || (!beforeJoining && nominal < tarif)
                                             ? 'bg-amber-100 text-amber-800 border border-amber-300'
                                             : 'bg-emerald-50 text-emerald-700 border border-emerald-200/70'
                                         }">
                                           ${Math.round(nominal / 1000)}k
-                                          ${nominal < tarif ? `<small class="block">Kurang ${formatRp(tarif - nominal)}</small>` : ''}
+                                          ${beforeJoining ? '<small class="block">Sebelum masuk</small>' : nominal < tarif ? `<small class="block">Kurang ${formatRp(tarif - nominal)}</small>` : ''}
                                         </div>
                                       </td>
                                     `;
@@ -3084,7 +3105,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                     </td>
                     <td class="py-3 px-4 text-xs text-slate-600">
                       <div>${escapeHtml(m.catatan_status || '—')}</div>
-                      ${m.aktif_sejak ? `<div class="text-[11px] text-slate-400">Sejak ${escapeHtml(m.aktif_sejak)}</div>` : ''}
+                      ${m.aktif_sejak ? `<div class="text-[11px] text-slate-400">Sejak ${escapeHtml(joinDateLabel(m.aktif_sejak))}</div>` : ''}
                     </td>
                     <td class="py-3 px-4 text-right whitespace-nowrap">
                       <button aria-label="Edit anggota" title="Edit anggota" ${isAdmin()?'':'hidden'} onclick="openMemberModal('${m.id}')" class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-teal-700"><i data-lucide="pencil" class="w-4 h-4"></i></button>
@@ -3115,12 +3136,15 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
     function openMemberModal(editId = null) {
       if(!isAdmin())return;
       const m = editId ? State.data.anggota.find((x) => x.id === editId) : null;
+      const prior = joinDateParts(m?.aktif_sejak);
+      const now = new Date();
+      const today = [now.getFullYear(), String(now.getMonth()+1).padStart(2,'0'), String(now.getDate()).padStart(2,'0')].join('-');
       openModal(`
         <div class="p-5 border-b border-slate-200 flex items-center justify-between">
           <h3 class="text-base font-bold text-slate-900">${m ? 'Edit Data Anggota' : 'Tambah Anggota Baru'}</h3>
           <button onclick="closeModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100"><i data-lucide="x" class="w-4 h-4"></i></button>
         </div>
-        <form onsubmit="saveMember(event, '${editId || ''}')" class="p-5 space-y-4">
+        <form onsubmit="saveMember(event, '${editId || ''}')" class="p-5 space-y-4 overflow-y-auto">
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Nama Lengkap</label>
@@ -3155,9 +3179,10 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
               </select>
             </div>
             <div>
-              <label class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Aktif Sejak</label>
-              <input id="mem-sejak" type="text" value="${escapeHtml(m?.aktif_sejak || String(new Date().getFullYear()))}" placeholder="Contoh: 2026"
-                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm" />
+              <label for="mem-sejak" class="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Tanggal masuk anggota</label>
+              <input id="mem-sejak" type="date" min="1000-01-01" max="9999-12-31" value="${m ? prior.iso : today}" ${!m || prior.iso ? 'required' : ''} aria-describedby="mem-sejak-info"
+                class="min-w-0 w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm" />
+              <p id="mem-sejak-info" class="mt-1 text-xs text-slate-600">${m && !prior.iso ? 'Data lama: '+escapeHtml(m.aktif_sejak || 'belum diisi')+'. Kosongkan untuk mempertahankannya. ' : ''}Iuran penuh mulai bulan masuk.</p>
             </div>
           </div>
           <div>
@@ -3188,7 +3213,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
         username: document.getElementById('mem-user').value.trim().toLowerCase(),
 
         status: document.getElementById('mem-status').value,
-        aktif_sejak: document.getElementById('mem-sejak').value.trim(),
+        aktif_sejak: document.getElementById('mem-sejak').value || State.data.anggota.find(m => m.id === editId)?.aktif_sejak || '',
         catatan_status: document.getElementById('mem-catatan').value.trim(),
       };
       try {

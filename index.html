@@ -541,6 +541,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
       txSearch: '',
       patYearFilter: 'Semua',
       patSearch: '',
+      participantSearch: '',
       reportMember: '',
       patStatusFilter: 'Semua',
       activePatunganId: null,
@@ -723,8 +724,10 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
 
     function updateSearch(input) {
       const { id, value, selectionStart, selectionEnd } = input;
+      const scrollTop = document.getElementById('main-scroll-area')?.scrollTop || 0;
       State[id] = value;
       renderApp();
+      document.getElementById('main-scroll-area').scrollTop = scrollTop;
       const next = document.getElementById(id);
       next.focus({ preventScroll: true });
       next.setSelectionRange(selectionStart, selectionEnd);
@@ -2364,7 +2367,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                     const pct = st.pengeluaran > 0 ? Math.min(100, Math.round((st.terkumpul / st.pengeluaran) * 100)) : 100;
                     const isSurplus = st.selisih >= 0;
                     return `
-                      <div onclick="State.activePatunganId='${ev.id}'; renderApp();"
+                      <div onclick="State.participantSearch=''; State.activePatunganId='${ev.id}'; renderApp();"
                         class="glass-card rounded-2xl p-5 cursor-pointer hover:border-teal-300 hover:shadow-float transition-all flex flex-col justify-between group">
                         <div>
                           <div class="flex items-start justify-between gap-2 mb-2">
@@ -2428,6 +2431,8 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
       const admin = isAdmin();
       const st = computePatunganStats(eventId);
       const peserta = State.data.patungan_peserta.filter((p) => p.patungan_id === eventId);
+      const query = State.participantSearch.trim().toLowerCase();
+      const matches = peserta.filter(p => (p.nama_peserta || '').toLowerCase().includes(query));
       const isSurplus = st.selisih >= 0;
 
       return `
@@ -2525,6 +2530,10 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                   : ''
               }
             </div>
+            <div class="px-4 py-3 flex flex-wrap items-center gap-3">
+              <input type="search" id="participantSearch" aria-label="Cari nama peserta" placeholder="Cari nama peserta..." value="${escapeHtml(State.participantSearch)}" oninput="updateSearch(this)" class="w-full sm:w-72 px-3 py-2 rounded-xl border border-slate-200 text-sm">
+              ${query ? `<span class="text-xs text-slate-600" role="status">${matches.length} dari ${peserta.length} peserta</span>` : ''}
+            </div>
             <div class="overflow-x-auto">
               <table class="w-full text-left border-collapse min-w-[620px]">
                 <thead>
@@ -2539,9 +2548,9 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
                 </thead>
                 <tbody class="divide-y divide-slate-200/70 text-sm">
                   ${
-                    peserta.length === 0
-                      ? `<tr><td colspan="${admin ? 6 : 5}" class="py-10 text-center text-slate-400">Belum ada peserta terdaftar pada event ini.</td></tr>`
-                      : peserta
+                    matches.length === 0
+                      ? `<tr><td colspan="${admin ? 6 : 5}" class="py-10 text-center text-slate-400">${peserta.length ? 'Tidak ada nama peserta yang cocok.' : 'Belum ada peserta terdaftar pada event ini.'}</td></tr>`
+                      : matches
                           .map((p, idx) => {
                             const lunas = p.status_bayar === 'Lunas';
                             return `
@@ -2710,6 +2719,7 @@ const DEFAULT_SUPABASE_ANON_KEY = isProduction
           const ids=Array.from(form.querySelectorAll('#event-members input:checked'),input=>input.value);
           const {error}=await DB.client.rpc('buat_patungan_dengan_anggota',{p_id:id,p_acara:payload,p_anggota:ids});
           if(error) throw error;
+          State.participantSearch = '';
           State.activePatunganId = id;
           showToast('Event patungan berhasil dibuat.', 'success');
         }
